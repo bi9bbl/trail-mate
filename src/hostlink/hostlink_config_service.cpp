@@ -129,10 +129,13 @@ bool apply_config(const uint8_t* data, size_t len, uint32_t* out_err)
 
     app::AppContext& app_ctx = app::AppContext::getInstance();
     app::AppConfig& cfg = app_ctx.getConfig();
+    const chat::MeshProtocol original_protocol = cfg.mesh_protocol;
     bool mesh_changed = false;
     bool net_changed = false;
     bool chat_changed = false;
     bool aprs_changed = false;
+    bool protocol_changed = false;
+    chat::MeshProtocol target_protocol = cfg.mesh_protocol;
 
     size_t off = 0;
     while (off + 2 <= len)
@@ -151,8 +154,14 @@ bool apply_config(const uint8_t* data, size_t len, uint32_t* out_err)
             {
                 return false;
             }
-            cfg.mesh_protocol = static_cast<chat::MeshProtocol>(data[off]);
+            if (data[off] != static_cast<uint8_t>(chat::MeshProtocol::Meshtastic) &&
+                data[off] != static_cast<uint8_t>(chat::MeshProtocol::MeshCore))
+            {
+                return false;
+            }
+            target_protocol = static_cast<chat::MeshProtocol>(data[off]);
             mesh_changed = true;
+            protocol_changed = (target_protocol != original_protocol);
             break;
         case ConfigKey::Region:
             if (vlen != 1)
@@ -316,7 +325,14 @@ bool apply_config(const uint8_t* data, size_t len, uint32_t* out_err)
         off += vlen;
     }
 
-    app_ctx.saveConfig();
+    if (protocol_changed)
+    {
+        if (!app_ctx.switchMeshProtocol(target_protocol, false))
+        {
+            return false;
+        }
+        mesh_changed = false; // backend switch already applies active mesh config
+    }
     if (mesh_changed)
     {
         app_ctx.applyMeshConfig();
@@ -330,6 +346,7 @@ bool apply_config(const uint8_t* data, size_t len, uint32_t* out_err)
         app_ctx.getChatService().switchChannel(static_cast<chat::ChannelId>(cfg.chat_channel));
     }
     (void)aprs_changed;
+    app_ctx.saveConfig();
     return true;
 }
 

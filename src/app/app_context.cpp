@@ -134,8 +134,9 @@ bool AppContext::init(BoardBase& board, LoraBoard* lora_board, GpsBoard* gps_boa
         chat_store_ = std::make_unique<chat::RamStore>();
     }
 
-    // Create mesh adapter (selected by config)
+    // Create mesh adapter router + selected protocol backend
     (void)use_mock_adapter;
+    mesh_router_ = std::make_unique<chat::MeshAdapterRouter>();
     std::unique_ptr<chat::IMeshAdapter> adapter;
     if (lora_board_)
     {
@@ -144,9 +145,12 @@ bool AppContext::init(BoardBase& board, LoraBoard* lora_board, GpsBoard* gps_boa
     if (adapter)
     {
         adapter->applyConfig(config_.activeMeshConfig());
-        mesh_adapter_ = std::move(adapter);
+        if (!mesh_router_->installBackend(config_.mesh_protocol, std::move(adapter)))
+        {
+            Serial.printf("[APP] WARNING: Failed to install mesh adapter backend\n");
+        }
     }
-    chat::IMeshAdapter* adapter_raw = mesh_adapter_.get();
+    chat::IMeshAdapter* adapter_raw = mesh_router_.get();
     applyUserInfo();
     applyNetworkLimits();
     applyPrivacyConfig();
@@ -170,14 +174,14 @@ bool AppContext::init(BoardBase& board, LoraBoard* lora_board, GpsBoard* gps_boa
 
     // Create chat service
     chat_service_ = std::make_unique<chat::ChatService>(
-        *chat_model_, *mesh_adapter_, *chat_store_, config_.mesh_protocol);
+        *chat_model_, *mesh_router_, *chat_store_, config_.mesh_protocol);
     applyChatDefaults();
 
     // Create team service (protocol-only for now)
     team_crypto_ = std::make_unique<team::infra::TeamCrypto>();
     team_event_sink_ = std::make_unique<team::infra::TeamEventBusSink>();
     team_service_ = std::make_unique<team::TeamService>(
-        *team_crypto_, *mesh_adapter_, *team_event_sink_);
+        *team_crypto_, *mesh_router_, *team_event_sink_);
     team_controller_ = std::make_unique<team::TeamController>(*team_service_);
     team_track_sampler_ = std::make_unique<team::TeamTrackSampler>();
     team_pairing_service_ = std::make_unique<team::TeamPairingService>();
@@ -214,6 +218,57 @@ bool AppContext::init(BoardBase& board, LoraBoard* lora_board, GpsBoard* gps_boa
         *node_store_, *contact_store_);
     contact_service_->begin();
 
+    return true;
+}
+
+bool AppContext::switchMeshProtocol(chat::MeshProtocol protocol, bool persist)
+{
+    if (!mesh_router_ || !lora_board_)
+    {
+        return false;
+    }
+
+    if (protocol != chat::MeshProtocol::Meshtastic &&
+        protocol != chat::MeshProtocol::MeshCore)
+    {
+        return false;
+    }
+
+    std::unique_ptr<chat::IMeshAdapter> backend =
+        chat::ProtocolFactory::createAdapter(protocol, *lora_board_);
+    if (!backend)
+    {
+        return false;
+    }
+
+    const chat::MeshProtocol previous_protocol = config_.mesh_protocol;
+    config_.mesh_protocol = protocol;
+
+    backend->applyConfig(config_.activeMeshConfig());
+
+    char long_name[sizeof(config_.node_name)];
+    char short_name[sizeof(config_.short_name)];
+    getEffectiveUserInfo(long_name, sizeof(long_name),
+                         short_name, sizeof(short_name));
+    backend->setUserInfo(long_name, short_name);
+    backend->setNetworkLimits(config_.net_duty_cycle, config_.net_channel_util);
+    backend->setPrivacyConfig(config_.privacy_encrypt_mode, config_.privacy_pki);
+
+    if (!mesh_router_->installBackend(protocol, std::move(backend)))
+    {
+        config_.mesh_protocol = previous_protocol;
+        return false;
+    }
+
+    if (chat_service_)
+    {
+        chat_service_->setActiveProtocol(protocol);
+    }
+
+    if (persist)
+    {
+        saveConfig();
+    }
     return true;
 }
 

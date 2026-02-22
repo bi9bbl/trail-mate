@@ -23,6 +23,7 @@ class AppContext;
 #include "../board/LoraBoard.h"
 #include "../board/MotionBoard.h"
 #include "../chat/infra/contact_store.h"
+#include "../chat/infra/mesh_adapter_router.h"
 #include "../chat/infra/meshtastic/node_store.h"
 #include "../chat/infra/store/flash_store.h"
 #include "../chat/infra/store/log_store.h"
@@ -110,17 +111,17 @@ class AppContext
 
     chat::NodeId getSelfNodeId() const
     {
-        return mesh_adapter_ ? mesh_adapter_->getNodeId() : 0;
+        return mesh_router_ ? mesh_router_->getNodeId() : 0;
     }
 
     chat::IMeshAdapter* getMeshAdapter()
     {
-        return mesh_adapter_.get();
+        return mesh_router_.get();
     }
 
     const chat::IMeshAdapter* getMeshAdapter() const
     {
-        return mesh_adapter_.get();
+        return mesh_router_.get();
     }
 
     LoraBoard* getLoraBoard()
@@ -140,9 +141,16 @@ class AppContext
 
     void applyMeshConfig()
     {
-        if (mesh_adapter_)
+        if (mesh_router_)
         {
-            mesh_adapter_->applyConfig(config_.activeMeshConfig());
+            if (mesh_router_->backendProtocol() != config_.mesh_protocol)
+            {
+                (void)switchMeshProtocol(config_.mesh_protocol, false);
+            }
+            else
+            {
+                mesh_router_->applyConfig(config_.activeMeshConfig());
+            }
         }
         if (chat_service_)
         {
@@ -152,20 +160,20 @@ class AppContext
 
     void applyUserInfo()
     {
-        if (mesh_adapter_)
+        if (mesh_router_)
         {
             char long_name[sizeof(config_.node_name)];
             char short_name[sizeof(config_.short_name)];
             getEffectiveUserInfo(long_name, sizeof(long_name), short_name, sizeof(short_name));
-            mesh_adapter_->setUserInfo(long_name, short_name);
+            mesh_router_->setUserInfo(long_name, short_name);
         }
     }
 
     void broadcastNodeInfo()
     {
-        if (mesh_adapter_)
+        if (mesh_router_)
         {
-            mesh_adapter_->requestNodeInfo(0xFFFFFFFF, false);
+            mesh_router_->requestNodeInfo(0xFFFFFFFF, false);
         }
     }
 
@@ -174,19 +182,27 @@ class AppContext
 
     void applyNetworkLimits()
     {
-        if (mesh_adapter_)
+        if (mesh_router_)
         {
-            mesh_adapter_->setNetworkLimits(config_.net_duty_cycle, config_.net_channel_util);
+            mesh_router_->setNetworkLimits(config_.net_duty_cycle, config_.net_channel_util);
         }
     }
 
     void applyPrivacyConfig()
     {
-        if (mesh_adapter_)
+        if (mesh_router_)
         {
-            mesh_adapter_->setPrivacyConfig(config_.privacy_encrypt_mode, config_.privacy_pki);
+            mesh_router_->setPrivacyConfig(config_.privacy_encrypt_mode, config_.privacy_pki);
         }
     }
+
+    /**
+     * @brief Switch active mesh protocol backend at runtime
+     * @param protocol Target protocol backend
+     * @param persist Save config to NVS if true
+     * @return true on success
+     */
+    bool switchMeshProtocol(chat::MeshProtocol protocol, bool persist = true);
 
     void applyChatDefaults()
     {
@@ -243,7 +259,7 @@ class AppContext
 
     // Infrastructure
     std::unique_ptr<chat::IChatStore> chat_store_;
-    std::unique_ptr<chat::IMeshAdapter> mesh_adapter_;
+    std::unique_ptr<chat::MeshAdapterRouter> mesh_router_;
     std::unique_ptr<chat::meshtastic::NodeStore> node_store_;
     std::unique_ptr<chat::contacts::ContactStore> contact_store_;
 

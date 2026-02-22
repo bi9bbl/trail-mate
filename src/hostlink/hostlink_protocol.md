@@ -88,6 +88,8 @@ the APRS config keys are supported.
 2) PC sends HELLO.
 3) Device replies HELLO_ACK.
 4) Link state becomes READY. Commands are accepted.
+5) Device immediately pushes `EV_STATUS` (same payload shape as `CMD_GET_CONFIG` response),
+   so PC can apply protocol-specific UI/config behavior without waiting for periodic status.
 
 If no HELLO is received within 5 seconds after DTR, the device returns to
 Waiting state. Any non-HELLO frames before READY receive `ACK(NOT_IN_MODE)`.
@@ -140,7 +142,7 @@ u8 key, u8 len, u8[len] value
 
 Config keys:
 - 1: MeshProtocol (u8)
-- 2: Region (u8)
+- 2: Region (u8, Meshtastic profile)
 - 3: Channel (u8)
 - 4: DutyCycle (u8, 0/1)
 - 5: ChannelUtil (u8)
@@ -157,6 +159,18 @@ Config keys:
 - 30: AprsNodeIdMap (blob, see format below)
 - 31: AprsSelfEnable (u8, 0/1)
 - 32: AprsSelfCallsign (string, ASCII, CALL-SSID)
+
+MeshProtocol values:
+- 1: Meshtastic
+- 2: MeshCore
+
+Runtime behavior:
+- Changing `MeshProtocol` triggers backend adapter switch in firmware runtime
+  (no stale old-protocol adapter is kept alive).
+- If switch fails, command returns error and config is not persisted.
+- Setting `MeshProtocol` to the already-active value does not force a backend restart.
+- `Region` currently maps to Meshtastic region/profile storage. When MeshCore is active,
+  this key is retained but does not retune active MeshCore RF parameters.
 
 AprsNodeIdMap format (value bytes):
 
@@ -248,7 +262,7 @@ Status keys:
 - 2: Charging (u8, 0/1)
 - 3: LinkState (u8)
 - 4: MeshProtocol (u8)
-- 5: Region (u8)
+- 5: Region (u8, Meshtastic profile)
 - 6: Channel (u8)
 - 7: DutyCycle (u8, 0/1)
 - 8: ChannelUtil (u8)
@@ -620,8 +634,15 @@ u8  note[note_len]
 ### 2) Other app payloads (non-team portnum)
 
 All other portnums are forwarded as EV_APP_DATA with plaintext payload
-exactly as received from the mesh adapter. Most of these are **Meshtastic
-protobuf messages**. PC should:
+exactly as received from the active mesh adapter.
+
+Protocol guidance:
+- Read `StatusKey::MeshProtocol` from `EV_STATUS` and cache it as current decode context.
+- `MeshProtocol=Meshtastic`: most non-team payloads are Meshtastic protobuf.
+- `MeshProtocol=MeshCore`: payloads can be MeshCore app/control payloads and are not
+  guaranteed to be Meshtastic protobuf-compatible.
+
+For Meshtastic context, PC should:
 
 1) Read `portnum`.
 2) Map it to a Meshtastic message type.

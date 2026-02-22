@@ -784,6 +784,9 @@ void handle_frame(const Frame& frame)
     {
         send_hello_ack(frame.seq);
         set_state(LinkState::Ready);
+        // Push current protocol/config snapshot immediately so PC can adapt UI
+        // (e.g. hide Meshtastic-only settings while MeshCore is active).
+        send_status_event(true);
         hostlink::bridge::on_link_ready();
         s_handshake_deadline = 0;
         return;
