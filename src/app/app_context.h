@@ -18,6 +18,7 @@ namespace app
 {
 class AppContext;
 }
+#include "../ble/ble_manager.h"
 #include "../board/BoardBase.h"
 #include "../board/GpsBoard.h"
 #include "../board/LoraBoard.h"
@@ -101,6 +102,16 @@ class AppContext
         return team_pairing_service_.get();
     }
 
+    team::TeamService* getTeamService()
+    {
+        return team_service_.get();
+    }
+
+    const team::TeamService* getTeamService() const
+    {
+        return team_service_.get();
+    }
+
     /**
      * @brief Get configuration
      */
@@ -109,10 +120,7 @@ class AppContext
         return config_;
     }
 
-    chat::NodeId getSelfNodeId() const
-    {
-        return mesh_router_ ? mesh_router_->getNodeId() : 0;
-    }
+    chat::NodeId getSelfNodeId() const;
 
     chat::IMeshAdapter* getMeshAdapter()
     {
@@ -132,6 +140,36 @@ class AppContext
     const LoraBoard* getLoraBoard() const
     {
         return lora_board_;
+    }
+
+    BoardBase* getBoard()
+    {
+        return board_;
+    }
+
+    const BoardBase* getBoard() const
+    {
+        return board_;
+    }
+
+    chat::meshtastic::NodeStore* getNodeStore()
+    {
+        return node_store_.get();
+    }
+
+    const chat::meshtastic::NodeStore* getNodeStore() const
+    {
+        return node_store_.get();
+    }
+
+    chat::contacts::ContactStore* getContactStore()
+    {
+        return contact_store_.get();
+    }
+
+    const chat::contacts::ContactStore* getContactStore() const
+    {
+        return contact_store_.get();
     }
 
     void saveConfig()
@@ -168,6 +206,9 @@ class AppContext
             mesh_router_->setUserInfo(long_name, short_name);
         }
     }
+
+    /** Apply position/GPS config to GpsService (interval, GNSS mode). Call after changing config_.gps_* */
+    void applyPositionConfig();
 
     void broadcastNodeInfo()
     {
@@ -248,6 +289,14 @@ class AppContext
      */
     void update();
 
+    // BLE control (used by Settings -> System -> Bluetooth toggle)
+    void setBleEnabled(bool enabled);
+
+    bool isBleEnabled() const
+    {
+        return ble_manager_ && ble_manager_->isEnabled();
+    }
+
   private:
     AppContext() = default;
     ~AppContext() = default;
@@ -275,6 +324,9 @@ class AppContext
 
     // UI
     std::unique_ptr<chat::ui::UiController> ui_controller_;
+
+    // BLE
+    std::unique_ptr<ble::BleManager> ble_manager_;
 
     // Power management
 

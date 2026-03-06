@@ -110,6 +110,9 @@ static void disp_flush(lv_display_t* disp_drv, const lv_area_t* area, uint8_t* c
 // Forward declaration from main.cpp
 extern bool isScreenSleeping();
 extern void updateUserActivity();
+extern bool isScreenSaverActive();
+extern void wakeScreenSaver();
+extern void enterFromScreenSaver();
 
 static void touchpad_read(lv_indev_t* drv, lv_indev_data_t* data)
 {
@@ -119,18 +122,47 @@ static void touchpad_read(lv_indev_t* drv, lv_indev_data_t* data)
     if (touched)
     {
         input::MorseEngine::notifyTouch();
-        if (isScreenSleeping())
+#if defined(ARDUINO_T_DECK)
+        // T-Deck: touch can wake/show the screen saver, but only SPACE enters the main menu.
+        if (isScreenSaverActive())
         {
-            updateUserActivity();
+            wakeScreenSaver();
+            data->state = LV_INDEV_STATE_REL;
+            return;
         }
-        else
+        else if (isScreenSleeping())
         {
-            updateUserActivity();
+            wakeScreenSaver();
+            data->state = LV_INDEV_STATE_REL;
+            return;
         }
+        updateUserActivity();
         data->point.x = x;
         data->point.y = y;
         data->state = LV_INDEV_STATE_PR;
         return;
+#else
+        // 其他设备仍然保持“先唤醒、不传给 UI”的逻辑。
+        // Priority: if screen saver is visible, consume the touch to exit it.
+        if (isScreenSaverActive())
+        {
+            enterFromScreenSaver();
+            data->state = LV_INDEV_STATE_REL;
+            return;
+        }
+        // Otherwise, if the screen is sleeping, first touch only wakes it and shows the screen saver.
+        if (isScreenSleeping())
+        {
+            wakeScreenSaver();
+            data->state = LV_INDEV_STATE_REL;
+            return;
+        }
+        updateUserActivity();
+        data->point.x = x;
+        data->point.y = y;
+        data->state = LV_INDEV_STATE_PR;
+        return;
+#endif
     }
     data->state = LV_INDEV_STATE_REL;
 }
@@ -140,6 +172,8 @@ static void touchpad_read(lv_indev_t* drv, lv_indev_data_t* data)
 // Forward declaration from main.cpp
 extern bool isScreenSleeping();
 extern void updateUserActivity();
+extern bool isScreenSaverActive();
+extern void wakeScreenSaver();
 // Forward declaration from ui_gps.cpp
 extern bool isGPSLoadingTiles();
 
@@ -153,11 +187,11 @@ static void lv_encoder_read(lv_indev_t* drv, lv_indev_data_t* data)
 #endif
 
     // If screen is sleeping, only wake it up, don't pass input to UI
-    if (isScreenSleeping())
+    if (isScreenSleeping() || isScreenSaverActive())
     {
         if (msg.dir != ROTARY_DIR_NONE || msg.centerBtnPressed)
         {
-            updateUserActivity(); // Wake up screen
+            wakeScreenSaver();
         }
 #if defined(ARDUINO_T_DECK)
         // T-Deck path already reset above.
@@ -238,6 +272,9 @@ static void lv_encoder_read(lv_indev_t* drv, lv_indev_data_t* data)
 // Forward declaration from main.cpp
 extern bool isScreenSleeping();
 extern void updateUserActivity();
+extern bool isScreenSaverActive();
+extern void wakeScreenSaver();
+extern void enterFromScreenSaver();
 
 static void keypad_read(lv_indev_t* drv, lv_indev_data_t* data)
 {
@@ -245,12 +282,31 @@ static void keypad_read(lv_indev_t* drv, lv_indev_data_t* data)
     auto* plane = (LilyGo_Display*)lv_indev_get_user_data(drv);
     int state = plane->getKeyChar(&c);
 
-    // If screen is sleeping, only wake it up, don't pass input to UI
-    if (isScreenSleeping())
+    // If screen is sleeping or screen saver is active, only a *real* key press
+    // should wake/exit. Previously this path ran unconditionally on every poll,
+    // which could cause spurious wake→enterFromScreenSaver() without user input.
+    if (isScreenSleeping() || isScreenSaverActive())
     {
         if (state == KEYBOARD_PRESSED)
         {
-            updateUserActivity(); // Wake up screen
+#if defined(ARDUINO_T_DECK)
+            // T-Deck policy: first key wake shows the screen saver, and only SPACE enters the main menu.
+            if (isScreenSleeping())
+            {
+                wakeScreenSaver();
+            }
+            else if (isScreenSaverActive() && c == ' ')
+            {
+                enterFromScreenSaver();
+            }
+#else
+            // Other keyboard devices keep the original behavior:
+            // first key wakes the screen saver, and any key exits it.
+            if (isScreenSaverActive())
+                enterFromScreenSaver();
+            else
+                wakeScreenSaver();
+#endif
         }
         data->state = LV_INDEV_STATE_REL; // Don't pass key to UI
         return;

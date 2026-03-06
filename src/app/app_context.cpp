@@ -4,6 +4,8 @@
  */
 
 #include "app_context.h"
+#include "../chat/infra/meshcore/mc_region_presets.h"
+#include "../chat/infra/meshtastic/mt_region.h"
 #include "../chat/infra/protocol_factory.h"
 #include "../gps/usecase/gps_service.h"
 #include "../gps/usecase/track_recorder.h"
@@ -21,6 +23,9 @@
 #include <SD.h>
 #include <cstdio>
 #include <cstring>
+#if __has_include("esp_efuse.h")
+#include "esp_efuse.h"
+#endif
 
 namespace app
 {
@@ -56,6 +61,73 @@ uint8_t load_message_tone_volume()
     }
     return static_cast<uint8_t>(value);
 }
+
+bool apply_region_pref_fallback(app::AppConfig& config, Preferences& prefs)
+{
+    bool has_region = false;
+    bool has_mc_preset = false;
+    if (prefs.begin("chat", true))
+    {
+        has_region = prefs.isKey("region");
+        has_mc_preset = prefs.isKey("mc_region_preset");
+        prefs.end();
+    }
+
+    if (has_region && has_mc_preset)
+    {
+        return false;
+    }
+
+    int ui_region = -1;
+    int ui_mc_preset = -1;
+    if (prefs.begin("settings", true))
+    {
+        if (!has_region)
+        {
+            ui_region = prefs.getInt("chat_region", -1);
+        }
+        if (!has_mc_preset)
+        {
+            ui_mc_preset = prefs.getInt("mc_region_preset", -1);
+        }
+        prefs.end();
+    }
+
+    bool changed = false;
+    if (!has_region && ui_region > 0)
+    {
+        const auto* region = chat::meshtastic::findRegion(
+            static_cast<meshtastic_Config_LoRaConfig_RegionCode>(ui_region));
+        if (region && region->code != meshtastic_Config_LoRaConfig_RegionCode_UNSET)
+        {
+            config.meshtastic_config.region = static_cast<uint8_t>(ui_region);
+            changed = true;
+        }
+    }
+
+    if (!has_mc_preset && ui_mc_preset >= 0)
+    {
+        const uint8_t preset_id = static_cast<uint8_t>(ui_mc_preset);
+        if (chat::meshcore::isValidRegionPresetId(preset_id))
+        {
+            config.meshcore_config.meshcore_region_preset = preset_id;
+            if (preset_id > 0)
+            {
+                if (const chat::meshcore::RegionPreset* preset =
+                        chat::meshcore::findRegionPresetById(preset_id))
+                {
+                    config.meshcore_config.meshcore_freq_mhz = preset->freq_mhz;
+                    config.meshcore_config.meshcore_bw_khz = preset->bw_khz;
+                    config.meshcore_config.meshcore_sf = preset->sf;
+                    config.meshcore_config.meshcore_cr = preset->cr;
+                }
+            }
+            changed = true;
+        }
+    }
+
+    return changed;
+}
 } // namespace
 
 bool AppContext::init(BoardBase& board, LoraBoard* lora_board, GpsBoard* gps_board, MotionBoard* motion_board,
@@ -76,6 +148,10 @@ bool AppContext::init(BoardBase& board, LoraBoard* lora_board, GpsBoard* gps_boa
 
     // Load configuration
     config_.load(preferences_);
+    if (apply_region_pref_fallback(config_, preferences_))
+    {
+        config_.save(preferences_);
+    }
     (void)ui_get_timezone_offset_min();
 
     if (gps_board_ && motion_board_)
@@ -218,6 +294,21 @@ bool AppContext::init(BoardBase& board, LoraBoard* lora_board, GpsBoard* gps_boa
         *node_store_, *contact_store_);
     contact_service_->begin();
 
+    // Start BLE services
+    ble_manager_ = std::make_unique<ble::BleManager>(*this);
+    {
+        // Default BLE enable state comes from "settings" NVS namespace,
+        // key "ble_enabled". If not present, default to enabled.
+        Preferences prefs;
+        prefs.begin("settings", true);
+        bool ble_enabled = prefs.getBool("ble_enabled", true);
+        prefs.end();
+        if (ble_enabled)
+        {
+            ble_manager_->setEnabled(true);
+        }
+    }
+
     return true;
 }
 
@@ -270,6 +361,12 @@ bool AppContext::switchMeshProtocol(chat::MeshProtocol protocol, bool persist)
         saveConfig();
     }
     return true;
+}
+
+void AppContext::applyPositionConfig()
+{
+    gps::GpsService::getInstance().setCollectionInterval(config_.gps_interval_ms);
+    gps::GpsService::getInstance().setGnssConfig(config_.gps_mode, config_.gps_sat_mask);
 }
 
 void AppContext::getEffectiveUserInfo(char* out_long, size_t long_len,
@@ -341,6 +438,10 @@ void AppContext::update()
     if (team_track_sampler_)
     {
         team_track_sampler_->update(team_controller_.get(), team_active);
+    }
+    if (ble_manager_)
+    {
+        ble_manager_->update();
     }
 
     // Update UI controller
@@ -479,7 +580,9 @@ void AppContext::update()
                     node_event->timestamp,
                     node_event->protocol,
                     node_event->role,
-                    node_event->hops_away);
+                    node_event->hops_away,
+                    node_event->hw_model,
+                    node_event->channel);
             }
             // Don't forward to UI - this is handled by ContactService
             delete event;
@@ -612,6 +715,62 @@ void AppContext::update()
             delete event;
         }
     }
+}
+
+void AppContext::setBleEnabled(bool enabled)
+{
+    if (ble_manager_)
+    {
+        ble_manager_->setEnabled(enabled);
+    }
+}
+
+chat::NodeId AppContext::getSelfNodeId() const
+{
+    // Cache in static so we don't hit NVS or MAC every call
+    static chat::NodeId cached_id = 0;
+    if (cached_id != 0)
+    {
+        return cached_id;
+    }
+
+    // Derive the canonical node id from the last 4 MAC bytes in byte order.
+    // This must stay aligned with Meshtastic/MeshCore radio adapters, otherwise
+    // BLE-reported self node ID and on-air node ID diverge.
+    uint8_t mac_bytes[6] = {};
+#if __has_include(<Arduino.h>)
+    const uint64_t raw = ESP.getEfuseMac();
+    const uint8_t* p = reinterpret_cast<const uint8_t*>(&raw);
+    for (size_t i = 0; i < 6; ++i)
+    {
+        mac_bytes[i] = p[i];
+    }
+#else
+    (void)esp_efuse_mac_get_default(mac_bytes);
+#endif
+
+    uint32_t node_id = (static_cast<uint32_t>(mac_bytes[2]) << 24) |
+                       (static_cast<uint32_t>(mac_bytes[3]) << 16) |
+                       (static_cast<uint32_t>(mac_bytes[4]) << 8) |
+                       (static_cast<uint32_t>(mac_bytes[5]) << 0);
+    if (node_id == 0)
+    {
+        node_id = 1;
+    }
+
+    // Migrate any previously persisted legacy ID to the canonical radio-aligned ID.
+    {
+        Preferences prefs;
+        prefs.begin("chat", false);
+        if (prefs.getUInt("node_id", 0) != node_id)
+        {
+            prefs.putUInt("node_id", node_id);
+        }
+        prefs.end();
+    }
+
+    cached_id = node_id;
+    return cached_id;
 }
 
 void AppContext::clearNodeDb()
