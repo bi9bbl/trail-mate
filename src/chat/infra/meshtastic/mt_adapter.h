@@ -206,6 +206,17 @@ class MtAdapter : public chat::IMeshAdapter
     bool sendNodeInfoTo(uint32_t dest, bool want_response,
                         ChannelId channel = ChannelId::PRIMARY);
     bool sendPositionTo(uint32_t dest, ChannelId channel);
+    bool sendTraceRouteResponse(uint32_t dest,
+                                uint32_t request_id,
+                                const meshtastic_RouteDiscovery& route,
+                                ChannelId channel,
+                                bool want_ack);
+    bool handleTraceRoutePacket(const PacketHeaderWire& header,
+                                meshtastic_Data* decoded,
+                                const chat::RxMeta* rx_meta,
+                                ChannelId channel,
+                                bool want_ack_flag,
+                                bool want_response);
     void maybeBroadcastNodeInfo(uint32_t now_ms);
     void configureRadio();
     void initNodeIdentity();

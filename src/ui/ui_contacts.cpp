@@ -78,7 +78,7 @@ void ui_contacts_enter(lv_obj_t* parent)
     // All layout code lives in the dedicated layout module.
     g_contacts_state.root = contacts::ui::layout::create_root(parent);
 
-    lv_obj_t* header = contacts::ui::layout::create_header(
+    contacts::ui::layout::create_header(
         g_contacts_state.root,
         contacts_top_bar_back,
         nullptr);
@@ -89,17 +89,9 @@ void ui_contacts_enter(lv_obj_t* parent)
     // Initialize battery indicator on the shared top bar.
     ui_update_top_bar_battery(g_contacts_state.top_bar);
 
-    // Create only two columns: Filter + List (no persistent Action panel on the right).
+    // Build the two-pane page: filter column + list column.
     create_filter_panel(content);
-    create_list_panel(content);
-    g_contacts_state.action_panel = nullptr;
-    g_contacts_state.chat_btn = nullptr;
-    g_contacts_state.position_btn = nullptr;
-    g_contacts_state.edit_btn = nullptr;
-    g_contacts_state.del_btn = nullptr;
-    g_contacts_state.add_btn = nullptr;
-    g_contacts_state.info_btn = nullptr;
-    g_contacts_state.action_back_btn = nullptr;
+    contacts::ui::layout::create_list_panel(content);
 
     // Restore previous default group before initializing input.
     set_default_group(prev_group);

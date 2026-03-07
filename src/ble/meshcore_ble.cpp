@@ -4,9 +4,13 @@
 #include "../chat/domain/contact_types.h"
 #include "../chat/infra/mesh_adapter_router.h"
 #include "../chat/infra/meshcore/meshcore_adapter.h"
+#include "../display/DisplayConfig.h"
+#include "../gps/gps_service_api.h"
+#include "../ui/widgets/ble_pairing_popup.h"
 #include "ble_uuids.h"
 #include <Arduino.h>
 #include <Preferences.h>
+#include <SD.h>
 #include <algorithm>
 #include <cstring>
 #include <ctime>
@@ -130,6 +134,85 @@ constexpr size_t kPubKeySize = chat::meshcore::MeshCoreIdentity::kPubKeySize;
 constexpr size_t kPubKeyPrefixSize = 6;
 constexpr size_t kMaxPathSize = 64;
 constexpr uint32_t kBleWriteMinIntervalMs = 60;
+constexpr bool kMeshCoreBleSecurityEnabled = true;
+constexpr uint32_t kMeshCoreDefaultBlePin = 123456;
+constexpr uint8_t kMeshCoreCompatFirmwareVerCode = 8;
+constexpr uint8_t kMeshCoreCompatMaxContactsDiv2 = 50;
+constexpr uint8_t kMeshCoreCompatMaxGroupChannels = 1;
+constexpr const char* kMeshCoreCompatFirmwareVersion = "v1.11.0";
+
+int8_t encodeSnrQdb(int16_t snr_x10)
+{
+    if (snr_x10 == std::numeric_limits<int16_t>::min())
+    {
+        return 0;
+    }
+    int32_t qdb = (static_cast<int32_t>(snr_x10) * 4) / 10;
+    if (qdb > 127)
+    {
+        qdb = 127;
+    }
+    else if (qdb < -128)
+    {
+        qdb = -128;
+    }
+    return static_cast<int8_t>(qdb);
+}
+
+int8_t encodeRssiDbm(int16_t rssi_x10)
+{
+    if (rssi_x10 == std::numeric_limits<int16_t>::min())
+    {
+        return 0;
+    }
+    int32_t dbm = rssi_x10 / 10;
+    if (dbm > 127)
+    {
+        dbm = 127;
+    }
+    else if (dbm < -128)
+    {
+        dbm = -128;
+    }
+    return static_cast<int8_t>(dbm);
+}
+
+int16_t decodeSnrX10FromQdb(int8_t snr_qdb)
+{
+    return static_cast<int16_t>((static_cast<int32_t>(snr_qdb) * 10) / 4);
+}
+
+bool parseBoolValue(const char* value, bool* out)
+{
+    if (!value || !out)
+    {
+        return false;
+    }
+    if (strcmp(value, "1") == 0 || strcmp(value, "true") == 0 || strcmp(value, "on") == 0 || strcmp(value, "yes") == 0)
+    {
+        *out = true;
+        return true;
+    }
+    if (strcmp(value, "0") == 0 || strcmp(value, "false") == 0 || strcmp(value, "off") == 0 || strcmp(value, "no") == 0)
+    {
+        *out = false;
+        return true;
+    }
+    return false;
+}
+
+const char* meshCoreCompatManufacturerName()
+{
+#if defined(ARDUINO_T_DECK)
+    return "LilyGo T-Deck";
+#elif defined(ARDUINO_LILYGO_TWATCH_S3)
+    return "LilyGo T-Watch S3";
+#elif defined(ARDUINO_LILYGO_LORA_SX1262) || defined(ARDUINO_LILYGO_LORA_SX1280)
+    return "LilyGo T-LoRa-Pager";
+#else
+    return "TrailMate";
+#endif
+}
 
 int estimateBatteryMv(int percent)
 {
@@ -176,9 +259,14 @@ void copyBounded(char* dst, size_t dst_len, const char* src)
     dst[dst_len - 1] = '\0';
 }
 
-bool isValidBlePin(uint32_t pin)
+bool isConfiguredBlePin(uint32_t pin)
 {
     return pin == 0 || (pin >= 100000 && pin <= 999999);
+}
+
+bool isUsableBlePasskey(uint32_t pin)
+{
+    return pin >= 100000 && pin <= 999999;
 }
 
 } // namespace
@@ -193,7 +281,6 @@ class MeshCoreRxCallbacks : public NimBLECharacteristicCallbacks
 
     void onWrite(NimBLECharacteristic* characteristic, NimBLEConnInfo& connInfo) override
     {
-        (void)connInfo;
         if (!characteristic)
         {
             return;
@@ -201,12 +288,41 @@ class MeshCoreRxCallbacks : public NimBLECharacteristicCallbacks
         NimBLEAttValue val = characteristic->getValue();
         if (val.length() == 0 || val.length() > kMaxFrameSize)
         {
+            Serial.printf("[BLE][meshcore] rx write ignored len=%u handle=%u enc=%u auth=%u\n",
+                          static_cast<unsigned>(val.length()),
+                          static_cast<unsigned>(connInfo.getConnHandle()),
+                          connInfo.isEncrypted() ? 1U : 0U,
+                          connInfo.isAuthenticated() ? 1U : 0U);
             return;
         }
+        Serial.printf("[BLE][meshcore] rx write len=%u cmd=%u handle=%u enc=%u auth=%u\n",
+                      static_cast<unsigned>(val.length()),
+                      static_cast<unsigned>(val.data()[0]),
+                      static_cast<unsigned>(connInfo.getConnHandle()),
+                      connInfo.isEncrypted() ? 1U : 0U,
+                      connInfo.isAuthenticated() ? 1U : 0U);
         MeshCoreBleService::Frame frame;
         frame.len = static_cast<uint8_t>(val.length());
         memcpy(frame.buf.data(), val.data(), frame.len);
         owner_.rx_queue_.push_back(frame);
+    }
+
+  private:
+    MeshCoreBleService& owner_;
+};
+
+class MeshCoreTxCallbacks : public NimBLECharacteristicCallbacks
+{
+  public:
+    explicit MeshCoreTxCallbacks(MeshCoreBleService& owner) : owner_(owner) {}
+
+    void onSubscribe(NimBLECharacteristic* characteristic, NimBLEConnInfo& connInfo, uint16_t subValue) override
+    {
+        (void)characteristic;
+        owner_.tx_subscribed_ = (subValue & 0x0001U) != 0;
+        Serial.printf("[BLE][meshcore] tx subscribe sub=0x%X handle=%u\n",
+                      static_cast<unsigned>(subValue),
+                      static_cast<unsigned>(connInfo.getConnHandle()));
     }
 
   private:
@@ -218,23 +334,81 @@ class MeshCoreServerCallbacks : public NimBLEServerCallbacks
   public:
     explicit MeshCoreServerCallbacks(MeshCoreBleService& owner) : owner_(owner) {}
 
+    uint32_t onPassKeyDisplay() override
+    {
+        owner_.refreshBlePin();
+        const uint32_t passkey = owner_.effectiveBlePin();
+        owner_.pending_passkey_.store(passkey);
+        Serial.printf("[BLE][meshcore] pairing passkey=%06lu\n", static_cast<unsigned long>(passkey));
+        return passkey;
+    }
+
+    void onAuthenticationComplete(NimBLEConnInfo& connInfo) override
+    {
+        const bool authenticated = connInfo.isEncrypted() && connInfo.isAuthenticated();
+        owner_.connected_ = kMeshCoreBleSecurityEnabled ? authenticated : true;
+        owner_.negotiated_mtu_ = connInfo.getMTU();
+        owner_.pending_passkey_.store(0);
+        Serial.printf("[BLE][meshcore] auth complete bonded=%u enc=%u auth=%u handle=%u\n",
+                      connInfo.isBonded() ? 1U : 0U,
+                      connInfo.isEncrypted() ? 1U : 0U,
+                      connInfo.isAuthenticated() ? 1U : 0U,
+                      static_cast<unsigned>(connInfo.getConnHandle()));
+    }
+
+    void onMTUChange(uint16_t mtu, NimBLEConnInfo& connInfo) override
+    {
+        owner_.negotiated_mtu_ = mtu;
+        Serial.printf("[BLE][meshcore] mtu update handle=%u mtu=%u enc=%u auth=%u\n",
+                      static_cast<unsigned>(connInfo.getConnHandle()),
+                      static_cast<unsigned>(mtu),
+                      connInfo.isEncrypted() ? 1U : 0U,
+                      connInfo.isAuthenticated() ? 1U : 0U);
+    }
+
     void onConnect(NimBLEServer* server, NimBLEConnInfo& connInfo) override
     {
         (void)server;
-        (void)connInfo;
-        owner_.connected_ = true;
+        owner_.connected_ = !kMeshCoreBleSecurityEnabled;
+        owner_.tx_subscribed_ = false;
+        owner_.conn_handle_ = connInfo.getConnHandle();
+        owner_.conn_handle_valid_ = true;
+        owner_.negotiated_mtu_ = connInfo.getMTU();
+        owner_.pending_passkey_.store(0);
+        if (kMeshCoreBleSecurityEnabled)
+        {
+            owner_.refreshBlePin();
+            if (!connInfo.isEncrypted())
+            {
+                int rc = 0;
+                const bool ok = NimBLEDevice::startSecurity(connInfo.getConnHandle(), &rc);
+                Serial.printf("[BLE][meshcore] startSecurity handle=%u ok=%u rc=%d\n",
+                              static_cast<unsigned>(connInfo.getConnHandle()),
+                              ok ? 1U : 0U,
+                              rc);
+            }
+        }
+        Serial.printf("[BLE][meshcore] connected addr=%s mtu=%u bonded=%u\n",
+                      connInfo.getAddress().toString().c_str(),
+                      static_cast<unsigned>(connInfo.getMTU()),
+                      connInfo.isBonded() ? 1U : 0U);
     }
 
     void onDisconnect(NimBLEServer* server, NimBLEConnInfo& connInfo, int reason) override
     {
         (void)server;
         (void)connInfo;
-        (void)reason;
         owner_.connected_ = false;
+        owner_.tx_subscribed_ = false;
+        owner_.conn_handle_valid_ = false;
+        owner_.conn_handle_ = 0;
+        owner_.negotiated_mtu_ = 23;
+        owner_.pending_passkey_.store(0);
         owner_.outbound_.clear();
         owner_.rx_queue_.clear();
         owner_.startAdvertising();
-        Serial.printf("[BLE][meshcore] disconnected; advertising restarted uuid=%s\n",
+        Serial.printf("[BLE][meshcore] disconnected reason=%d; advertising restarted uuid=%s\n",
+                      reason,
                       NUS_SERVICE_UUID);
     }
 
@@ -253,6 +427,261 @@ MeshCoreBleService::MeshCoreBleService(app::AppContext& ctx, const std::string& 
 MeshCoreBleService::~MeshCoreBleService()
 {
     stop();
+}
+
+uint32_t MeshCoreBleService::effectiveBlePin() const
+{
+    return active_ble_pin_;
+}
+
+void MeshCoreBleService::refreshBlePin()
+{
+    if (!kMeshCoreBleSecurityEnabled)
+    {
+        active_ble_pin_ = 0;
+        return;
+    }
+
+    if (ble_pin_ != 0 && isUsableBlePasskey(ble_pin_))
+    {
+        active_ble_pin_ = ble_pin_;
+        NimBLEDevice::setSecurityPasskey(active_ble_pin_);
+        return;
+    }
+
+    active_ble_pin_ = kMeshCoreDefaultBlePin;
+    NimBLEDevice::setSecurityPasskey(active_ble_pin_);
+}
+
+void MeshCoreBleService::noteLinkStats(int16_t rssi_dbm_x10, int16_t snr_db_x10)
+{
+    if (rssi_dbm_x10 != std::numeric_limits<int16_t>::min())
+    {
+        last_rssi_dbm_x10_ = rssi_dbm_x10;
+    }
+    if (snr_db_x10 != std::numeric_limits<int16_t>::min())
+    {
+        last_snr_db_x10_ = snr_db_x10;
+    }
+}
+
+void MeshCoreBleService::noteRxMeta(const chat::RxMeta& rx_meta)
+{
+    noteLinkStats(rx_meta.rssi_dbm_x10, rx_meta.snr_db_x10);
+    ++stats_rx_packets_;
+    if (rx_meta.direct)
+    {
+        ++stats_rx_direct_;
+    }
+    else
+    {
+        ++stats_rx_flood_;
+    }
+}
+
+void MeshCoreBleService::noteEventRx(int8_t rssi_dbm, int8_t snr_qdb)
+{
+    noteLinkStats(static_cast<int16_t>(rssi_dbm) * 10, decodeSnrX10FromQdb(snr_qdb));
+    ++stats_rx_packets_;
+}
+
+void MeshCoreBleService::noteSentRoute(bool sent_flood)
+{
+    ++stats_tx_packets_;
+    if (sent_flood)
+    {
+        ++stats_tx_flood_;
+    }
+    else
+    {
+        ++stats_tx_direct_;
+    }
+}
+
+void MeshCoreBleService::appendCustomVar(std::string& out, const char* key, const char* value) const
+{
+    if (!key || !value)
+    {
+        return;
+    }
+    if (!out.empty())
+    {
+        out.push_back(',');
+    }
+    out += key;
+    out.push_back(':');
+    out += value;
+}
+
+bool MeshCoreBleService::handleCustomVarSet(const char* key, const char* value)
+{
+    if (!key || !value)
+    {
+        return false;
+    }
+
+    auto& cfg = ctx_.getConfig();
+    bool save_cfg = false;
+    bool apply_mesh = false;
+    bool apply_user = false;
+    bool apply_position = false;
+    bool save_ble = false;
+
+    if (strcmp(key, "node_name") == 0)
+    {
+        copyBounded(cfg.node_name, sizeof(cfg.node_name), value);
+        save_cfg = true;
+        apply_user = true;
+    }
+    else if (strcmp(key, "channel_name") == 0)
+    {
+        copyBounded(cfg.meshcore_config.meshcore_channel_name,
+                    sizeof(cfg.meshcore_config.meshcore_channel_name), value);
+        save_cfg = true;
+        apply_mesh = true;
+    }
+    else if (strcmp(key, "ble_pin") == 0)
+    {
+        const uint32_t pin = static_cast<uint32_t>(strtoul(value, nullptr, 10));
+        if (!isConfiguredBlePin(pin))
+        {
+            return false;
+        }
+        ble_pin_ = pin;
+        if (kMeshCoreBleSecurityEnabled)
+        {
+            refreshBlePin();
+        }
+        save_ble = true;
+    }
+    else if (strcmp(key, "manual_add_contacts") == 0)
+    {
+        bool parsed = false;
+        if (!parseBoolValue(value, &parsed))
+        {
+            return false;
+        }
+        manual_add_contacts_ = parsed;
+        save_ble = true;
+    }
+    else if (strcmp(key, "telemetry_base") == 0)
+    {
+        const long parsed = strtol(value, nullptr, 10);
+        if (parsed < 0 || parsed > 3)
+        {
+            return false;
+        }
+        telemetry_mode_base_ = static_cast<uint8_t>(parsed);
+        save_ble = true;
+    }
+    else if (strcmp(key, "telemetry_loc") == 0)
+    {
+        const long parsed = strtol(value, nullptr, 10);
+        if (parsed < 0 || parsed > 3)
+        {
+            return false;
+        }
+        telemetry_mode_loc_ = static_cast<uint8_t>(parsed);
+        save_ble = true;
+    }
+    else if (strcmp(key, "telemetry_env") == 0)
+    {
+        const long parsed = strtol(value, nullptr, 10);
+        if (parsed < 0 || parsed > 3)
+        {
+            return false;
+        }
+        telemetry_mode_env_ = static_cast<uint8_t>(parsed);
+        save_ble = true;
+    }
+    else if (strcmp(key, "advert_loc_policy") == 0)
+    {
+        const long parsed = strtol(value, nullptr, 10);
+        if (parsed < 0 || parsed > 255)
+        {
+            return false;
+        }
+        advert_loc_policy_ = static_cast<uint8_t>(parsed);
+        save_ble = true;
+    }
+    else if (strcmp(key, "multi_acks") == 0)
+    {
+        bool parsed = false;
+        if (!parseBoolValue(value, &parsed))
+        {
+            return false;
+        }
+        cfg.meshcore_config.meshcore_multi_acks = parsed;
+        multi_acks_ = parsed ? 1 : 0;
+        save_cfg = true;
+        apply_mesh = true;
+        save_ble = true;
+    }
+    else if (strcmp(key, "gps") == 0)
+    {
+        bool parsed = false;
+        if (!parseBoolValue(value, &parsed))
+        {
+            return false;
+        }
+        if (parsed)
+        {
+            if (cfg.gps_strategy == 2)
+            {
+                cfg.gps_strategy = 0;
+            }
+        }
+        else
+        {
+            cfg.gps_strategy = 2;
+        }
+        save_cfg = true;
+        apply_position = true;
+    }
+    else
+    {
+        return false;
+    }
+
+    if (save_ble)
+    {
+        saveBlePin();
+    }
+    if (save_cfg)
+    {
+        ctx_.saveConfig();
+    }
+    if (apply_user)
+    {
+        ctx_.applyUserInfo();
+    }
+    if (apply_mesh)
+    {
+        ctx_.applyMeshConfig();
+    }
+    if (apply_position)
+    {
+        ctx_.applyPositionConfig();
+        gps::gps_set_power_strategy(cfg.gps_strategy);
+    }
+    return true;
+}
+
+void MeshCoreBleService::enqueueRawDataPush(const uint8_t* payload, size_t len, const chat::RxMeta* meta)
+{
+    uint8_t out[kMaxFrameSize] = {};
+    int i = 0;
+    out[i++] = PUSH_CODE_RAW_DATA;
+    out[i++] = meta ? static_cast<uint8_t>(encodeSnrQdb(meta->snr_db_x10)) : 0;
+    out[i++] = meta ? static_cast<uint8_t>(encodeRssiDbm(meta->rssi_dbm_x10)) : 0;
+    out[i++] = 0xFF;
+    size_t copy_len = std::min(len, static_cast<size_t>(kMaxFrameSize - i));
+    if (payload && copy_len > 0)
+    {
+        memcpy(&out[i], payload, copy_len);
+        i += static_cast<int>(copy_len);
+    }
+    enqueueFrame(out, i);
 }
 
 chat::meshcore::MeshCoreAdapter* MeshCoreBleService::meshCoreAdapter()
@@ -284,6 +713,14 @@ const chat::meshcore::MeshCoreAdapter* MeshCoreBleService::meshCoreAdapter() con
 void MeshCoreBleService::start()
 {
     NimBLEDevice::setMTU(185);
+    if (kMeshCoreBleSecurityEnabled)
+    {
+        refreshBlePin();
+        NimBLEDevice::setSecurityAuth(BLE_SM_PAIR_AUTHREQ_BOND | BLE_SM_PAIR_AUTHREQ_MITM | BLE_SM_PAIR_AUTHREQ_SC);
+        NimBLEDevice::setSecurityInitKey(BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID);
+        NimBLEDevice::setSecurityRespKey(BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID);
+        NimBLEDevice::setSecurityIOCap(BLE_HS_IO_DISPLAY_ONLY);
+    }
     setupService();
     startAdvertising();
 
@@ -298,6 +735,8 @@ void MeshCoreBleService::start()
 
 void MeshCoreBleService::stop()
 {
+    pending_passkey_.store(0);
+    ::ui::BlePairingPopup::hide();
     ctx_.getChatService().removeIncomingTextObserver(this);
     if (auto* team = ctx_.getTeamService())
     {
@@ -320,6 +759,13 @@ void MeshCoreBleService::stop()
 
 void MeshCoreBleService::update()
 {
+    if (kMeshCoreBleSecurityEnabled)
+    {
+        ::ui::BlePairingPopup::update(
+            pending_passkey_.load(),
+            true,
+            device_name_.c_str());
+    }
     handleIncomingFrames();
     auto* adapter = meshCoreAdapter();
     if (adapter)
@@ -387,6 +833,7 @@ void MeshCoreBleService::update()
             {
             case chat::meshcore::MeshCoreAdapter::Event::Type::Response:
             {
+                noteEventRx(ev.rssi_dbm, ev.snr_qdb);
                 if (ev.payload.size() < 4)
                 {
                     break;
@@ -520,6 +967,7 @@ void MeshCoreBleService::update()
             }
             case chat::meshcore::MeshCoreAdapter::Event::Type::PathResponse:
             {
+                noteEventRx(ev.rssi_dbm, ev.snr_qdb);
                 if (pending_discovery_ == 0 || ev.tag != pending_discovery_)
                 {
                     break;
@@ -554,6 +1002,7 @@ void MeshCoreBleService::update()
             }
             case chat::meshcore::MeshCoreAdapter::Event::Type::ControlData:
             {
+                noteEventRx(ev.rssi_dbm, ev.snr_qdb);
                 uint8_t out[kMaxFrameSize] = {};
                 int i = 0;
                 out[i++] = PUSH_CODE_CONTROL_DATA;
@@ -571,6 +1020,7 @@ void MeshCoreBleService::update()
             }
             case chat::meshcore::MeshCoreAdapter::Event::Type::RawData:
             {
+                noteEventRx(ev.rssi_dbm, ev.snr_qdb);
                 uint8_t out[kMaxFrameSize] = {};
                 int i = 0;
                 out[i++] = PUSH_CODE_RAW_DATA;
@@ -588,6 +1038,7 @@ void MeshCoreBleService::update()
             }
             case chat::meshcore::MeshCoreAdapter::Event::Type::TraceData:
             {
+                noteEventRx(ev.rssi_dbm, ev.snr_qdb);
                 uint8_t out[kMaxFrameSize] = {};
                 int i = 0;
                 out[i++] = PUSH_CODE_TRACE_DATA;
@@ -620,6 +1071,7 @@ void MeshCoreBleService::update()
             }
             case chat::meshcore::MeshCoreAdapter::Event::Type::Advert:
             {
+                noteEventRx(ev.rssi_dbm, ev.snr_qdb);
                 uint8_t pubkey[kPubKeySize] = {};
                 fillPubkey(ev.peer_hash, ev.peer_node, pubkey);
                 bool known = false;
@@ -684,26 +1136,10 @@ void MeshCoreBleService::update()
 
 void MeshCoreBleService::onIncomingText(const chat::MeshIncomingText& msg)
 {
+    noteRxMeta(msg.rx_meta);
     Frame frame;
     int i = 0;
     const bool use_v3 = (app_target_ver_ >= 3);
-    auto encodeSnrQdb = [](int16_t snr_x10) -> int8_t
-    {
-        if (snr_x10 == std::numeric_limits<int16_t>::min())
-        {
-            return 0;
-        }
-        int32_t qdb = (static_cast<int32_t>(snr_x10) * 4) / 10;
-        if (qdb > 127)
-        {
-            qdb = 127;
-        }
-        else if (qdb < -128)
-        {
-            qdb = -128;
-        }
-        return static_cast<int8_t>(qdb);
-    };
     const uint8_t path_len = msg.rx_meta.direct ? 0xFF : msg.rx_meta.hop_count;
     if (msg.to == 0xFFFFFFFF || msg.to == 0)
     {
@@ -764,7 +1200,8 @@ void MeshCoreBleService::onIncomingText(const chat::MeshIncomingText& msg)
 
 void MeshCoreBleService::onIncomingData(const chat::MeshIncomingData& msg)
 {
-    (void)msg;
+    noteRxMeta(msg.rx_meta);
+    enqueueRawDataPush(msg.payload.data(), msg.payload.size(), &msg.rx_meta);
 }
 
 void MeshCoreBleService::setupService()
@@ -773,10 +1210,24 @@ void MeshCoreBleService::setupService()
     server_->setCallbacks(new MeshCoreServerCallbacks(*this));
 
     service_ = server_->createService(NUS_SERVICE_UUID);
-    tx_char_ = service_->createCharacteristic(NUS_CHAR_TX_UUID,
-                                              NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY);
+    if (kMeshCoreBleSecurityEnabled)
+    {
+        tx_char_ = service_->createCharacteristic(NUS_CHAR_TX_UUID,
+                                                  NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY |
+                                                      NIMBLE_PROPERTY::READ_AUTHEN | NIMBLE_PROPERTY::READ_ENC);
 
-    rx_char_ = service_->createCharacteristic(NUS_CHAR_RX_UUID, NIMBLE_PROPERTY::WRITE);
+        rx_char_ = service_->createCharacteristic(NUS_CHAR_RX_UUID,
+                                                  NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_AUTHEN |
+                                                      NIMBLE_PROPERTY::WRITE_ENC);
+    }
+    else
+    {
+        tx_char_ = service_->createCharacteristic(NUS_CHAR_TX_UUID,
+                                                  NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY);
+
+        rx_char_ = service_->createCharacteristic(NUS_CHAR_RX_UUID, NIMBLE_PROPERTY::WRITE);
+    }
+    tx_char_->setCallbacks(new MeshCoreTxCallbacks(*this));
     rx_char_->setCallbacks(new MeshCoreRxCallbacks(*this));
 
     service_->start();
@@ -789,16 +1240,24 @@ void MeshCoreBleService::startAdvertising()
         return;
     }
     NimBLEAdvertising* adv = server_->getAdvertising();
+    const bool reset_ok = adv->reset();
+    const bool conn_ok = adv->setConnectableMode(BLE_GAP_CONN_MODE_UND);
+    const bool disc_ok = adv->setDiscoverableMode(BLE_GAP_DISC_MODE_GEN);
     const bool service_ok = adv->addServiceUUID(NUS_SERVICE_UUID);
     adv->enableScanResponse(true);
     const bool name_ok = adv->setName(device_name_);
     const bool start_ok = adv->start();
-    Serial.printf("[BLE][meshcore] advertising uuid=%s name=%s service_ok=%u name_ok=%u start_ok=%u\n",
+    const bool active_ok = adv->isAdvertising();
+    Serial.printf("[BLE][meshcore] advertising uuid=%s name=%s reset_ok=%u conn_ok=%u disc_ok=%u service_ok=%u name_ok=%u start_ok=%u active_ok=%u\n",
                   NUS_SERVICE_UUID,
                   device_name_.c_str(),
+                  reset_ok ? 1U : 0U,
+                  conn_ok ? 1U : 0U,
+                  disc_ok ? 1U : 0U,
                   service_ok ? 1U : 0U,
                   name_ok ? 1U : 0U,
-                  start_ok ? 1U : 0U);
+                  start_ok ? 1U : 0U,
+                  active_ok ? 1U : 0U);
 }
 
 void MeshCoreBleService::handleIncomingFrames()
@@ -842,20 +1301,24 @@ void MeshCoreBleService::handleCmdFrame(size_t len)
     if (cmd == CMD_DEVICE_QEURY && len >= 2)
     {
         app_target_ver_ = cmd_frame_[1];
+        Serial.printf("[BLE][meshcore] cmd device_query ver=%u len=%u\n",
+                      static_cast<unsigned>(app_target_ver_),
+                      static_cast<unsigned>(len));
         uint8_t out[kMaxFrameSize] = {};
         int i = 0;
         out[i++] = RESP_CODE_DEVICE_INFO;
-        out[i++] = 8;
-        out[i++] = 50;
-        out[i++] = 2;
-        memcpy(&out[i], &ble_pin_, 4);
+        out[i++] = kMeshCoreCompatFirmwareVerCode;
+        out[i++] = kMeshCoreCompatMaxContactsDiv2;
+        out[i++] = kMeshCoreCompatMaxGroupChannels;
+        uint32_t reported_pin = ble_pin_;
+        memcpy(&out[i], &reported_pin, 4);
         i += 4;
         memset(&out[i], 0, 12);
         strncpy(reinterpret_cast<char*>(&out[i]), __DATE__, 11);
         i += 12;
-        strncpy(reinterpret_cast<char*>(&out[i]), "TrailMate", 40);
+        strncpy(reinterpret_cast<char*>(&out[i]), meshCoreCompatManufacturerName(), 40);
         i += 40;
-        strncpy(reinterpret_cast<char*>(&out[i]), "trail-mate", 20);
+        strncpy(reinterpret_cast<char*>(&out[i]), kMeshCoreCompatFirmwareVersion, 20);
         i += 20;
         enqueueFrame(out, i);
         return;
@@ -863,6 +1326,8 @@ void MeshCoreBleService::handleCmdFrame(size_t len)
 
     if (cmd == CMD_APP_START && len >= 8)
     {
+        Serial.printf("[BLE][meshcore] cmd app_start len=%u\n",
+                      static_cast<unsigned>(len));
         contacts_iter_active_ = false;
         contacts_frames_.clear();
         uint8_t out[kMaxFrameSize] = {};
@@ -880,6 +1345,12 @@ void MeshCoreBleService::handleCmdFrame(size_t len)
         i += kPubKeySize;
         int32_t lat = 0;
         int32_t lon = 0;
+        const gps::GpsState gps_state = gps::gps_get_data();
+        if (gps_state.valid)
+        {
+            lat = static_cast<int32_t>(gps_state.lat * 1000000.0);
+            lon = static_cast<int32_t>(gps_state.lng * 1000000.0);
+        }
         memcpy(&out[i], &lat, 4);
         i += 4;
         memcpy(&out[i], &lon, 4);
@@ -965,6 +1436,7 @@ void MeshCoreBleService::handleCmdFrame(size_t len)
         memcpy(&out[2], &expected_ack, 4);
         memcpy(&out[6], &est_timeout, 4);
         enqueueFrame(out, sizeof(out));
+        noteSentRoute(sent_flood);
         return;
     }
 
@@ -992,6 +1464,7 @@ void MeshCoreBleService::handleCmdFrame(size_t len)
             writeErr(ERR_CODE_TABLE_FULL);
             return;
         }
+        noteSentRoute(true);
         writeOk();
         return;
     }
@@ -1064,6 +1537,7 @@ void MeshCoreBleService::handleCmdFrame(size_t len)
         uint32_t prefix4 = 0;
         memcpy(&prefix4, pubkey, sizeof(prefix4));
         pending_login_ = prefix4;
+        noteSentRoute(sent_flood);
         uint8_t out[10] = {};
         out[0] = RESP_CODE_SENT;
         out[1] = sent_flood ? 1 : 0;
@@ -1102,6 +1576,7 @@ void MeshCoreBleService::handleCmdFrame(size_t len)
         memcpy(&prefix4, pubkey, sizeof(prefix4));
         pending_status_ = prefix4;
         pending_status_tag_ = tag;
+        noteSentRoute(sent_flood);
         uint8_t out[10] = {};
         out[0] = RESP_CODE_SENT;
         out[1] = sent_flood ? 1 : 0;
@@ -1336,8 +1811,13 @@ void MeshCoreBleService::handleCmdFrame(size_t len)
         return;
     }
 
-    if (cmd == CMD_REBOOT)
+    if (cmd == CMD_REBOOT && len >= 7)
     {
+        if (memcmp(&cmd_frame_[1], "reboot", 6) != 0)
+        {
+            writeErr(ERR_CODE_ILLEGAL_ARG);
+            return;
+        }
         writeOk();
         delay(200);
         ESP.restart();
@@ -1395,6 +1875,15 @@ void MeshCoreBleService::handleCmdFrame(size_t len)
         uint16_t mv = static_cast<uint16_t>(estimateBatteryMv(percent));
         uint32_t used = 0;
         uint32_t total = 0;
+#if defined(HAS_SD) && HAS_SD
+        if (board.isSDReady())
+        {
+            const uint64_t total_bytes = SD.totalBytes();
+            const uint64_t used_bytes = SD.usedBytes();
+            total = static_cast<uint32_t>(std::min<uint64_t>(total_bytes / 1024ULL, std::numeric_limits<uint32_t>::max()));
+            used = static_cast<uint32_t>(std::min<uint64_t>(used_bytes / 1024ULL, std::numeric_limits<uint32_t>::max()));
+        }
+#endif
         memcpy(&out[1], &mv, 2);
         memcpy(&out[3], &used, 4);
         memcpy(&out[7], &total, 4);
@@ -1482,6 +1971,7 @@ void MeshCoreBleService::handleCmdFrame(size_t len)
             ctx_.saveConfig();
             ctx_.applyMeshConfig();
         }
+        saveBlePin();
         writeOk();
         return;
     }
@@ -1550,12 +2040,16 @@ void MeshCoreBleService::handleCmdFrame(size_t len)
     if (cmd == CMD_SET_DEVICE_PIN && len >= 5)
     {
         uint32_t pin = readUint32LE(&cmd_frame_[1]);
-        if (!isValidBlePin(pin))
+        if (!isConfiguredBlePin(pin))
         {
             writeErr(ERR_CODE_ILLEGAL_ARG);
             return;
         }
         ble_pin_ = pin;
+        if (kMeshCoreBleSecurityEnabled)
+        {
+            refreshBlePin();
+        }
         saveBlePin();
         writeOk();
         return;
@@ -1637,6 +2131,7 @@ void MeshCoreBleService::handleCmdFrame(size_t len)
         }
         clearPendingRequests();
         pending_discovery_ = tag;
+        noteSentRoute(sent_flood);
         uint8_t out[10] = {};
         out[0] = RESP_CODE_SENT;
         out[1] = sent_flood ? 1 : 0;
@@ -1849,14 +2344,56 @@ void MeshCoreBleService::handleCmdFrame(size_t len)
 
     if (cmd == CMD_GET_CUSTOM_VARS)
     {
-        uint8_t out = RESP_CODE_CUSTOM_VARS;
-        enqueueFrame(&out, 1);
+        std::string vars;
+        char buf[40];
+        if (gps::gps_is_enabled())
+        {
+            appendCustomVar(vars, "gps", gps::gps_is_powered() ? "1" : "0");
+        }
+        appendCustomVar(vars, "node_name", cfg.node_name);
+        appendCustomVar(vars, "channel_name", cfg.meshcore_config.meshcore_channel_name);
+        const uint32_t reported_pin = ble_pin_;
+        snprintf(buf, sizeof(buf), "%lu", static_cast<unsigned long>(reported_pin));
+        appendCustomVar(vars, "ble_pin", buf);
+        appendCustomVar(vars, "manual_add_contacts", manual_add_contacts_ ? "1" : "0");
+        snprintf(buf, sizeof(buf), "%u", static_cast<unsigned>(telemetry_mode_base_));
+        appendCustomVar(vars, "telemetry_base", buf);
+        snprintf(buf, sizeof(buf), "%u", static_cast<unsigned>(telemetry_mode_loc_));
+        appendCustomVar(vars, "telemetry_loc", buf);
+        snprintf(buf, sizeof(buf), "%u", static_cast<unsigned>(telemetry_mode_env_));
+        appendCustomVar(vars, "telemetry_env", buf);
+        snprintf(buf, sizeof(buf), "%u", static_cast<unsigned>(advert_loc_policy_));
+        appendCustomVar(vars, "advert_loc_policy", buf);
+        appendCustomVar(vars, "multi_acks", cfg.meshcore_config.meshcore_multi_acks ? "1" : "0");
+
+        uint8_t out[kMaxFrameSize] = {};
+        out[0] = RESP_CODE_CUSTOM_VARS;
+        const size_t copy_len = std::min(vars.size(), static_cast<size_t>(kMaxFrameSize - 1));
+        if (copy_len > 0)
+        {
+            memcpy(&out[1], vars.data(), copy_len);
+        }
+        enqueueFrame(out, copy_len + 1);
         return;
     }
 
-    if (cmd == CMD_SET_CUSTOM_VAR)
+    if (cmd == CMD_SET_CUSTOM_VAR && len >= 4)
     {
-        writeErr(ERR_CODE_UNSUPPORTED_CMD);
+        cmd_frame_[len] = 0;
+        char* sp = reinterpret_cast<char*>(&cmd_frame_[1]);
+        char* np = strchr(sp, ':');
+        if (!np)
+        {
+            writeErr(ERR_CODE_ILLEGAL_ARG);
+            return;
+        }
+        *np++ = 0;
+        if (!handleCustomVarSet(sp, np))
+        {
+            writeErr(ERR_CODE_ILLEGAL_ARG);
+            return;
+        }
+        writeOk();
         return;
     }
 
@@ -1895,6 +2432,7 @@ void MeshCoreBleService::handleCmdFrame(size_t len)
         }
         clearPendingRequests();
         pending_req_ = tag;
+        noteSentRoute(sent_flood);
         uint8_t out[10] = {};
         out[0] = RESP_CODE_SENT;
         out[1] = sent_flood ? 1 : 0;
@@ -1986,10 +2524,17 @@ void MeshCoreBleService::handleCmdFrame(size_t len)
             out[i++] = RESP_CODE_STATS;
             out[i++] = STATS_TYPE_RADIO;
             int16_t noise_floor = 0;
-            int8_t last_rssi = 0;
-            int8_t last_snr = 0;
             uint32_t tx_air = 0;
             uint32_t rx_air = 0;
+            if (adapter)
+            {
+                const auto radio_stats = adapter->getRadioStats();
+                noise_floor = radio_stats.noise_floor_dbm;
+                tx_air = radio_stats.tx_airtime_ms / 1000;
+                rx_air = radio_stats.rx_airtime_ms / 1000;
+            }
+            int8_t last_rssi = encodeRssiDbm(last_rssi_dbm_x10_);
+            int8_t last_snr = encodeSnrQdb(last_snr_db_x10_);
             memcpy(&out[i], &noise_floor, 2);
             i += 2;
             out[i++] = static_cast<uint8_t>(last_rssi);
@@ -2007,9 +2552,16 @@ void MeshCoreBleService::handleCmdFrame(size_t len)
             int i = 0;
             out[i++] = RESP_CODE_STATS;
             out[i++] = STATS_TYPE_PACKETS;
-            uint32_t zeros[6] = {};
-            memcpy(&out[i], zeros, sizeof(zeros));
-            i += sizeof(zeros);
+            uint32_t counts[6] = {
+                stats_rx_packets_,
+                stats_tx_packets_,
+                stats_tx_flood_,
+                stats_tx_direct_,
+                stats_rx_flood_,
+                stats_rx_direct_,
+            };
+            memcpy(&out[i], counts, sizeof(counts));
+            i += sizeof(counts);
             enqueueFrame(out, i);
             return;
         }
@@ -2039,6 +2591,7 @@ void MeshCoreBleService::handleCmdFrame(size_t len)
                 writeErr(ERR_CODE_TABLE_FULL);
                 return;
             }
+            noteSentRoute(false);
             writeOk();
         }
         else
@@ -2093,6 +2646,7 @@ void MeshCoreBleService::handleCmdFrame(size_t len)
         }
         if (adapter->sendControlData(&cmd_frame_[1], len - 1))
         {
+            noteSentRoute(false);
             writeOk();
         }
         else
@@ -2115,9 +2669,19 @@ void MeshCoreBleService::handleCmdFrame(size_t len)
         manual_contacts_.clear();
         saveManualContacts();
         ble_pin_ = 0;
+        manual_add_contacts_ = false;
+        telemetry_mode_base_ = 0;
+        telemetry_mode_loc_ = 0;
+        telemetry_mode_env_ = 0;
+        advert_loc_policy_ = 0;
+        if (kMeshCoreBleSecurityEnabled)
+        {
+            refreshBlePin();
+        }
         saveBlePin();
         connections_.clear();
         known_peer_hashes_.clear();
+        multi_acks_ = 0;
         if (adapter)
         {
             adapter->setFloodScopeKey(nullptr, 0);
@@ -2222,7 +2786,7 @@ void MeshCoreBleService::enqueueOffline(const uint8_t* data, size_t len)
 
 void MeshCoreBleService::sendPendingFrames()
 {
-    if (!connected_ || !tx_char_ || outbound_.empty())
+    if (!connected_ || !tx_char_ || !tx_subscribed_ || !conn_handle_valid_ || outbound_.empty())
     {
         return;
     }
@@ -2233,9 +2797,35 @@ void MeshCoreBleService::sendPendingFrames()
     }
 
     Frame frame = outbound_.front();
-    outbound_.pop_front();
+    const uint16_t mtu = negotiated_mtu_;
+    const uint16_t att_payload_max = (mtu > 3U) ? static_cast<uint16_t>(mtu - 3U) : 0U;
+    if (frame.len > att_payload_max)
+    {
+        static uint32_t last_mtu_wait_log_ms = 0;
+        const uint32_t now_ms = millis();
+        if (now_ms - last_mtu_wait_log_ms > 500)
+        {
+            Serial.printf("[BLE][meshcore] tx wait mtu=%u need=%u code=%u q=%u\n",
+                          static_cast<unsigned>(mtu),
+                          static_cast<unsigned>(frame.len + 3U),
+                          static_cast<unsigned>(frame.buf[0]),
+                          static_cast<unsigned>(outbound_.size()));
+            last_mtu_wait_log_ms = now_ms;
+        }
+        return;
+    }
     tx_char_->setValue(frame.buf.data(), frame.len);
-    tx_char_->notify();
+    const bool notify_ok = tx_char_->notify(conn_handle_);
+    Serial.printf("[BLE][meshcore] tx notify len=%u code=%u ok=%u mtu=%u q=%u\n",
+                  static_cast<unsigned>(frame.len),
+                  static_cast<unsigned>(frame.buf[0]),
+                  notify_ok ? 1U : 0U,
+                  static_cast<unsigned>(mtu),
+                  static_cast<unsigned>(outbound_.size()));
+    if (notify_ok)
+    {
+        outbound_.pop_front();
+    }
     last_write_ms_ = now;
 }
 
@@ -2255,7 +2845,16 @@ void MeshCoreBleService::loadBlePin()
     if (prefs.begin("mc_ble", true))
     {
         ble_pin_ = prefs.getUInt("pin", 0);
+        manual_add_contacts_ = prefs.getBool("manual_add", false);
+        telemetry_mode_base_ = prefs.getUChar("telem_base", 0);
+        telemetry_mode_loc_ = prefs.getUChar("telem_loc", 0);
+        telemetry_mode_env_ = prefs.getUChar("telem_env", 0);
+        advert_loc_policy_ = prefs.getUChar("advert_loc", 0);
         prefs.end();
+    }
+    if (kMeshCoreBleSecurityEnabled)
+    {
+        refreshBlePin();
     }
 }
 
@@ -2265,6 +2864,11 @@ void MeshCoreBleService::saveBlePin()
     if (prefs.begin("mc_ble", false))
     {
         prefs.putUInt("pin", ble_pin_);
+        prefs.putBool("manual_add", manual_add_contacts_);
+        prefs.putUChar("telem_base", telemetry_mode_base_);
+        prefs.putUChar("telem_loc", telemetry_mode_loc_);
+        prefs.putUChar("telem_env", telemetry_mode_env_);
+        prefs.putUChar("advert_loc", advert_loc_policy_);
         prefs.end();
     }
 }

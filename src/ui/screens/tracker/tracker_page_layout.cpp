@@ -1,7 +1,7 @@
 /**
  * Tracker layout aligned with contacts_page:
  * Root(COL) -> Header + Content(ROW)
- * Content -> Filter Panel | List Panel | Action Panel
+ * Content -> Filter Panel | List Panel
  * List Panel -> Status Label + List Container + Bottom Bar
  */
 
@@ -52,7 +52,7 @@ lv_obj_t* create_header(lv_obj_t* root)
 {
     lv_obj_t* header = lv_obj_create(root);
     lv_obj_set_size(header, LV_PCT(100), ::ui::widgets::kTopBarHeight);
-    lv_obj_set_style_bg_color(header, lv_color_hex(0xFFF3DF), 0);
+    lv_obj_set_style_bg_color(header, lv_color_hex(0xF6E6C6), 0);
     lv_obj_set_style_pad_all(header, 0, 0);
     apply_base_container_style(header);
     return header;
@@ -85,7 +85,7 @@ lv_obj_t* create_filter_panel(lv_obj_t* content, int width)
     lv_obj_set_style_pad_row(panel, 3, LV_PART_MAIN);
     lv_obj_set_style_margin_left(panel, 0, LV_PART_MAIN);
     lv_obj_set_style_margin_right(panel, kPanelGap, LV_PART_MAIN);
-    lv_obj_set_style_bg_color(panel, lv_color_hex(0xFFF3DF), 0);
+    lv_obj_set_style_bg_color(panel, lv_color_hex(0xF6E6C6), 0);
     apply_base_container_style(panel);
     return panel;
 }
@@ -101,22 +101,7 @@ lv_obj_t* create_list_panel(lv_obj_t* content)
     lv_obj_set_style_pad_row(panel, 2, LV_PART_MAIN);
     lv_obj_set_style_margin_left(panel, 0, LV_PART_MAIN);
     lv_obj_set_style_margin_right(panel, 0, LV_PART_MAIN);
-    lv_obj_set_style_bg_color(panel, lv_color_hex(0xFFF7E9), 0);
-    apply_base_container_style(panel);
-    return panel;
-}
-
-lv_obj_t* create_action_panel(lv_obj_t* content, int width)
-{
-    lv_obj_t* panel = lv_obj_create(content);
-    lv_obj_set_width(panel, width);
-    lv_obj_set_height(panel, LV_PCT(100));
-    lv_obj_set_flex_flow(panel, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_pad_all(panel, 3, LV_PART_MAIN);
-    lv_obj_set_style_pad_row(panel, 3, LV_PART_MAIN);
-    lv_obj_set_style_margin_left(panel, kPanelGap, LV_PART_MAIN);
-    lv_obj_set_style_margin_right(panel, 0, LV_PART_MAIN);
-    lv_obj_set_style_bg_color(panel, lv_color_hex(0xFFF3DF), 0);
+    lv_obj_set_style_bg_color(panel, lv_color_hex(0xFAF0D8), 0);
     apply_base_container_style(panel);
     return panel;
 }
@@ -130,7 +115,7 @@ lv_obj_t* create_list_container(lv_obj_t* list_panel)
     lv_obj_set_flex_flow(container, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_style_pad_row(container, 2, LV_PART_MAIN);
     lv_obj_set_style_pad_all(container, 3, LV_PART_MAIN);
-    lv_obj_set_style_bg_color(container, lv_color_hex(0xFFF7E9), 0);
+    lv_obj_set_style_bg_color(container, lv_color_hex(0xFAF0D8), 0);
     apply_base_container_style(container);
     return container;
 }
@@ -145,7 +130,7 @@ lv_obj_t* create_bottom_bar(lv_obj_t* list_panel)
     lv_obj_set_flex_align(bar, LV_FLEX_ALIGN_SPACE_EVENLY,
                           LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_bg_color(bar, lv_color_hex(0xFFF7E9), 0);
+    lv_obj_set_style_bg_color(bar, lv_color_hex(0xFAF0D8), 0);
     apply_base_container_style(bar);
     return bar;
 }

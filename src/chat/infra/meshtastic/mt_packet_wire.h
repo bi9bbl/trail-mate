@@ -1,6 +1,6 @@
 /**
  * @file mt_packet_wire.h
- * @brief Meshtastic wire packet format (like M5Tab5-GPS)
+ * @brief Meshtastic-compatible wire packet format
  */
 
 #pragma once
@@ -14,7 +14,7 @@ namespace meshtastic
 {
 
 /**
- * @brief Packet header wire format (from M5Tab5-GPS)
+ * @brief Packet header wire format matching Meshtastic packets
  * This matches Meshtastic's on-air packet format
  */
 struct PacketHeaderWire
@@ -28,7 +28,7 @@ struct PacketHeaderWire
     uint8_t relay_node;
 } __attribute__((packed));
 
-// Packet header flag masks (from M5Tab5-GPS)
+// Packet header flag masks matching Meshtastic packets
 constexpr uint8_t PACKET_FLAGS_HOP_LIMIT_MASK = 0x07;
 constexpr uint8_t PACKET_FLAGS_WANT_ACK_MASK = 0x08;
 constexpr uint8_t PACKET_FLAGS_VIA_MQTT_MASK = 0x10;
@@ -72,7 +72,7 @@ bool parseWirePacket(const uint8_t* buffer, size_t size,
                      uint8_t* out_payload, size_t* out_payload_size);
 
 /**
- * @brief Decrypt payload using AES-CTR (like M5Tab5-GPS)
+ * @brief Decrypt payload using Meshtastic-compatible AES-CTR
  * @param header Packet header
  * @param cipher Encrypted payload
  * @param cipher_len Cipher length

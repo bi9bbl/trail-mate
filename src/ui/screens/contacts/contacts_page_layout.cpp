@@ -1,46 +1,4 @@
 /**
- * UI Wireframe / Layout Tree (Correct: 3 columns in one ROW)
- * --------------------------------------------------------------------
- *
- * Root Container (ROW, full screen)
- *
- * ┌──────────────────────────────────────────────────────────────────┐
- * │ ┌──────────────┐ ┌───────────────────────────────┐ ┌──────────────┐ │
- * │ │ Filter Panel │ │           List Panel          │ │ Action Panel │ │
- * │ │   (80px)     │ │        (flex-grow = 1)        │ │   (80px)     │ │
- * │ │ ┌──────────┐ │ │ ┌───────────────────────────┐ │ │           │ │
- * │ │ │ Contacts │ │ │ │ List Container            │ │ │ (context  │ │
- * │ │ └──────────┘ │ │ │ (COLUMN, flex-grow = 1)   │ │ │ actions)  │ │
- * │ │ ┌──────────┐ │ │ │                           │ │ │           │ │
- * │ │ │ Nearby   │ │ │ │  List Item × 4 / page     │ │ │           │ │
- * │ │ └──────────┘ │ │ │  [Name ..........] [St.]  │ │ │           │ │
- * │ │              │ │ │  ...                      │ │ │           │ │
- * │ │              │ │ └───────────────────────────┘ │ │           │ │
- * │ │              │ │ ┌───────────────────────────┐ │ │           │ │
- * │ │              │ │ │ Bottom Bar (ROW)          │ │ │           │ │
- * │ │              │ │ │ Prev | Next | Back        │ │ │           │ │
- * │ │              │ │ └───────────────────────────┘ │ │           │ │
- * │ └──────────────┘ └───────────────────────────────┘ └───────────┘ │
- * └──────────────────────────────────────────────────────────────────┘
- *
- * Tree view:
- * Root(ROW)
- * ├─ FilterPanel(80,COL) -> ContactsBtn, NearbyBtn
- * ├─ ListPanel(grow=1,COL)
- * │   ├─ ListContainer(grow=1,COL) -> ListItem(x4/page)-> NameLabel, StatusLabel
- * │   └─ BottomBar(ROW) -> PrevBtn, NextBtn, BackBtn
- * └─ ActionPanel(80,COL) -> (TBD action buttons)
- *
- *
- * Preconditions:
- * - The parent/root container uses LV_FLEX_FLOW_ROW to place 3 panels horizontally.
- *
- * Implementation notes:
- * - ListPanel contains two children: sub_container (flex_grow=1) and bottom_container (ROW).
- * - ActionPanel is a placeholder; action buttons are created elsewhere.
- */
-
-/**
  * @file contacts_page_layout.cpp
  * @brief Contacts layout
  */
@@ -49,6 +7,7 @@
 #include "../../../app/app_context.h"
 #include "../../../chat/domain/chat_types.h"
 #include "../../../chat/infra/meshtastic/mt_region.h"
+#include "../../components/two_pane_layout.h"
 #include <Arduino.h>
 
 using namespace contacts::ui;
@@ -62,30 +21,11 @@ namespace layout
 
 // Layout constants
 static constexpr int kFilterPanelWidth = 80;
-static constexpr int kActionPanelWidth = 80;
 static constexpr int kButtonHeight = 28;
 static constexpr int kButtonSpacing = 3;
-static constexpr int kPanelGap = 3;          // Gap between the three main columns
+static constexpr int kPanelGap = 3;          // Gap between filter and list columns
 static constexpr int kScreenEdgePadding = 3; // Padding at the screen edge
 static constexpr int kTopBarContentGap = 3;  // Vertical gap between TopBar and content
-
-// UI color tokens (must align with docs/skyplot.md)
-static constexpr uint32_t kColorWarmBg = 0xF6E6C6;
-
-// Helper functions
-static void make_non_scrollable(lv_obj_t* obj)
-{
-    lv_obj_clear_flag(obj, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_scrollbar_mode(obj, LV_SCROLLBAR_MODE_OFF);
-}
-
-static void apply_base_container_style(lv_obj_t* obj)
-{
-    lv_obj_set_style_bg_opa(obj, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(obj, 0, 0);
-    lv_obj_set_style_radius(obj, 0, 0);
-    make_non_scrollable(obj);
-}
 
 namespace
 {
@@ -118,34 +58,21 @@ void format_contacts_title(char* out, size_t out_len)
 
 lv_obj_t* create_root(lv_obj_t* parent)
 {
-    lv_obj_t* root = lv_obj_create(parent);
-    lv_obj_set_size(root, LV_PCT(100), LV_PCT(100));
-    lv_obj_set_flex_flow(root, LV_FLEX_FLOW_COLUMN);
-
-    // Style: transparent background so children control their own background color.
-    lv_obj_set_style_bg_opa(root, LV_OPA_TRANSP, 0);
-    apply_base_container_style(root);
-
-    // Gap between TopBar and content row.
-    lv_obj_set_style_pad_row(root, kTopBarContentGap, 0);
-    lv_obj_set_style_pad_all(root, 0, 0);
-
-    return root;
+    ::ui::components::two_pane_layout::RootSpec spec;
+    spec.pad_row = kTopBarContentGap;
+    return ::ui::components::two_pane_layout::create_root(parent, spec);
 }
 
 lv_obj_t* create_header(lv_obj_t* root,
                         void (*back_callback)(void*),
                         void* user_data)
 {
-    lv_obj_t* header = lv_obj_create(root);
-    lv_obj_set_size(header, LV_PCT(100), ::ui::widgets::kTopBarHeight);
+    ::ui::components::two_pane_layout::HeaderSpec header_spec;
+    header_spec.height = ::ui::widgets::kTopBarHeight;
+    header_spec.bg_hex = ::ui::components::two_pane_styles::kSidePanelBg;
+    header_spec.pad_all = 0;
+    lv_obj_t* header = ::ui::components::two_pane_layout::create_header_container(root, header_spec);
 
-    // Style for header / TopBar container.
-    lv_obj_set_style_bg_color(header, lv_color_hex(kColorWarmBg), 0);
-    apply_base_container_style(header);
-    lv_obj_set_style_pad_all(header, 0, 0);
-
-    // Initialize shared TopBar widget.
     ::ui::widgets::TopBarConfig cfg;
     cfg.height = ::ui::widgets::kTopBarHeight;
     ::ui::widgets::top_bar_init(g_contacts_state.top_bar, header, cfg);
@@ -159,84 +86,56 @@ lv_obj_t* create_header(lv_obj_t* root,
 
 lv_obj_t* create_content(lv_obj_t* root)
 {
-    lv_obj_t* content = lv_obj_create(root);
-
-    // Size and flex setup for main content row.
-    lv_obj_set_width(content, LV_PCT(100));
-    lv_obj_set_height(content, 0);
-    lv_obj_set_flex_grow(content, 1);
-    lv_obj_set_flex_flow(content, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(content,
-                          LV_FLEX_ALIGN_START,
-                          LV_FLEX_ALIGN_START,
-                          LV_FLEX_ALIGN_START);
-
-    // Style
-    lv_obj_set_style_bg_opa(content, LV_OPA_TRANSP, 0);
-    apply_base_container_style(content);
-
-    // Use only outer padding to control spacing to screen edges.
-    // Horizontal gaps between columns are controlled via panel margins.
-    lv_obj_set_style_pad_left(content, kScreenEdgePadding, 0);
-    lv_obj_set_style_pad_right(content, kScreenEdgePadding, 0);
-    lv_obj_set_style_pad_top(content, 0, 0);
-    lv_obj_set_style_pad_bottom(content, 0, 0);
-
-    return content;
+    ::ui::components::two_pane_layout::ContentSpec spec;
+    spec.pad_left = kScreenEdgePadding;
+    spec.pad_right = kScreenEdgePadding;
+    spec.pad_top = 0;
+    spec.pad_bottom = 0;
+    return ::ui::components::two_pane_layout::create_content_row(root, spec);
 }
 
 void create_filter_panel(lv_obj_t* parent)
 {
-    g_contacts_state.filter_panel = lv_obj_create(parent);
-    make_non_scrollable(g_contacts_state.filter_panel);
+    ::ui::components::two_pane_layout::SidePanelSpec panel_spec;
+    panel_spec.width = kFilterPanelWidth;
+    panel_spec.pad_row = kButtonSpacing;
+    panel_spec.margin_left = 0;
+    panel_spec.margin_right = kPanelGap;
+    g_contacts_state.filter_panel = ::ui::components::two_pane_layout::create_side_panel(parent, panel_spec);
 
-    // Apply style first so it does not override later size/margin tweaks.
     style::apply_panel_side(g_contacts_state.filter_panel);
 
-    // Fixed width for filter panel.
-    lv_obj_set_width(g_contacts_state.filter_panel, kFilterPanelWidth);
-    lv_obj_set_height(g_contacts_state.filter_panel, LV_PCT(100));
-    lv_obj_set_flex_flow(g_contacts_state.filter_panel, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_pad_row(g_contacts_state.filter_panel, 3, LV_PART_MAIN);
-
-    // Use margins for inter-panel spacing instead of negative margins.
-    // Filter is the left-most panel, so margin_left=0 (screen-edge padding is on content).
-    // Filter's right margin creates the gap to the List panel.
-    lv_obj_set_style_margin_left(g_contacts_state.filter_panel, 0, LV_PART_MAIN);
-    lv_obj_set_style_margin_right(g_contacts_state.filter_panel, kPanelGap, LV_PART_MAIN);
-
-    // Buttons
     g_contacts_state.contacts_btn = lv_btn_create(g_contacts_state.filter_panel);
-    make_non_scrollable(g_contacts_state.contacts_btn);
-    style::apply_btn_filter(g_contacts_state.contacts_btn);
     lv_obj_set_size(g_contacts_state.contacts_btn, LV_PCT(100), kButtonHeight);
+    ::ui::components::two_pane_layout::make_non_scrollable(g_contacts_state.contacts_btn);
+    style::apply_btn_filter(g_contacts_state.contacts_btn);
     lv_obj_t* contacts_label = lv_label_create(g_contacts_state.contacts_btn);
     lv_label_set_text(contacts_label, "Contacts");
     style::apply_label_primary(contacts_label);
     lv_obj_center(contacts_label);
 
     g_contacts_state.nearby_btn = lv_btn_create(g_contacts_state.filter_panel);
-    make_non_scrollable(g_contacts_state.nearby_btn);
-    style::apply_btn_filter(g_contacts_state.nearby_btn);
     lv_obj_set_size(g_contacts_state.nearby_btn, LV_PCT(100), kButtonHeight);
+    ::ui::components::two_pane_layout::make_non_scrollable(g_contacts_state.nearby_btn);
+    style::apply_btn_filter(g_contacts_state.nearby_btn);
     lv_obj_t* nearby_label = lv_label_create(g_contacts_state.nearby_btn);
     lv_label_set_text(nearby_label, "Nearby");
     style::apply_label_primary(nearby_label);
     lv_obj_center(nearby_label);
 
     g_contacts_state.broadcast_btn = lv_btn_create(g_contacts_state.filter_panel);
-    make_non_scrollable(g_contacts_state.broadcast_btn);
-    style::apply_btn_filter(g_contacts_state.broadcast_btn);
     lv_obj_set_size(g_contacts_state.broadcast_btn, LV_PCT(100), kButtonHeight);
+    ::ui::components::two_pane_layout::make_non_scrollable(g_contacts_state.broadcast_btn);
+    style::apply_btn_filter(g_contacts_state.broadcast_btn);
     lv_obj_t* broadcast_label = lv_label_create(g_contacts_state.broadcast_btn);
     lv_label_set_text(broadcast_label, "Broadcast");
     style::apply_label_primary(broadcast_label);
     lv_obj_center(broadcast_label);
 
     g_contacts_state.team_btn = lv_btn_create(g_contacts_state.filter_panel);
-    make_non_scrollable(g_contacts_state.team_btn);
-    style::apply_btn_filter(g_contacts_state.team_btn);
     lv_obj_set_size(g_contacts_state.team_btn, LV_PCT(100), kButtonHeight);
+    ::ui::components::two_pane_layout::make_non_scrollable(g_contacts_state.team_btn);
+    style::apply_btn_filter(g_contacts_state.team_btn);
     lv_obj_t* team_label = lv_label_create(g_contacts_state.team_btn);
     lv_label_set_text(team_label, "Team");
     style::apply_label_primary(team_label);
@@ -244,13 +143,14 @@ void create_filter_panel(lv_obj_t* parent)
     lv_obj_add_flag(g_contacts_state.team_btn, LV_OBJ_FLAG_HIDDEN);
 
     g_contacts_state.discover_btn = lv_btn_create(g_contacts_state.filter_panel);
-    make_non_scrollable(g_contacts_state.discover_btn);
-    style::apply_btn_filter(g_contacts_state.discover_btn);
     lv_obj_set_size(g_contacts_state.discover_btn, LV_PCT(100), kButtonHeight);
+    ::ui::components::two_pane_layout::make_non_scrollable(g_contacts_state.discover_btn);
+    style::apply_btn_filter(g_contacts_state.discover_btn);
     lv_obj_t* discover_label = lv_label_create(g_contacts_state.discover_btn);
     lv_label_set_text(discover_label, "Discover");
     style::apply_label_primary(discover_label);
     lv_obj_center(discover_label);
+
     if (app::AppContext::getInstance().getConfig().mesh_protocol != chat::MeshProtocol::MeshCore)
     {
         lv_obj_add_flag(g_contacts_state.discover_btn, LV_OBJ_FLAG_HIDDEN);
@@ -259,42 +159,15 @@ void create_filter_panel(lv_obj_t* parent)
 
 void create_list_panel(lv_obj_t* parent)
 {
-    g_contacts_state.list_panel = lv_obj_create(parent);
-    make_non_scrollable(g_contacts_state.list_panel);
+    ::ui::components::two_pane_layout::MainPanelSpec panel_spec;
+    panel_spec.pad_all = 0;
+    panel_spec.pad_row = 2;
+    panel_spec.margin_left = 0;
+    panel_spec.margin_right = 0;
+    panel_spec.scrollbar_mode = LV_SCROLLBAR_MODE_OFF;
+    g_contacts_state.list_panel = ::ui::components::two_pane_layout::create_main_panel(parent, panel_spec);
 
-    // Apply style first so it does not override our grow/width settings.
     style::apply_panel_main(g_contacts_state.list_panel);
-
-    // In a ROW flex layout, the middle column must have width=0 + flex_grow=1 to consume remaining space.
-    lv_obj_set_height(g_contacts_state.list_panel, LV_PCT(100));
-    lv_obj_set_width(g_contacts_state.list_panel, 0);
-    lv_obj_set_flex_grow(g_contacts_state.list_panel, 1);
-
-    lv_obj_set_flex_flow(g_contacts_state.list_panel, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_pad_row(g_contacts_state.list_panel, 2, LV_PART_MAIN);
-
-    // Middle column itself has no horizontal margins; spacing is controlled by filter/action panels.
-    lv_obj_set_style_margin_left(g_contacts_state.list_panel, 0, LV_PART_MAIN);
-    lv_obj_set_style_margin_right(g_contacts_state.list_panel, 0, LV_PART_MAIN);
-}
-
-void create_action_panel(lv_obj_t* parent)
-{
-    g_contacts_state.action_panel = lv_obj_create(parent);
-    make_non_scrollable(g_contacts_state.action_panel);
-
-    // Apply style first so it does not override size configuration.
-    style::apply_panel_side(g_contacts_state.action_panel);
-
-    // Fixed width for action panel.
-    lv_obj_set_width(g_contacts_state.action_panel, kActionPanelWidth);
-    lv_obj_set_height(g_contacts_state.action_panel, LV_PCT(100));
-    lv_obj_set_flex_flow(g_contacts_state.action_panel, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_pad_row(g_contacts_state.action_panel, kButtonSpacing, LV_PART_MAIN);
-
-    // Horizontal spacing: left margin creates the gap to the List panel; right edge uses content padding.
-    lv_obj_set_style_margin_left(g_contacts_state.action_panel, kPanelGap, LV_PART_MAIN);
-    lv_obj_set_style_margin_right(g_contacts_state.action_panel, 0, LV_PART_MAIN);
 }
 
 void ensure_list_subcontainers()
@@ -304,7 +177,7 @@ void ensure_list_subcontainers()
     if (g_contacts_state.sub_container == nullptr)
     {
         g_contacts_state.sub_container = lv_obj_create(g_contacts_state.list_panel);
-        make_non_scrollable(g_contacts_state.sub_container);
+        ::ui::components::two_pane_layout::make_non_scrollable(g_contacts_state.sub_container);
 
         style::apply_container_white(g_contacts_state.sub_container);
 
@@ -320,7 +193,7 @@ void ensure_list_subcontainers()
     if (g_contacts_state.bottom_container == nullptr)
     {
         g_contacts_state.bottom_container = lv_obj_create(g_contacts_state.list_panel);
-        make_non_scrollable(g_contacts_state.bottom_container);
+        ::ui::components::two_pane_layout::make_non_scrollable(g_contacts_state.bottom_container);
 
         style::apply_container_white(g_contacts_state.bottom_container);
 
@@ -343,7 +216,7 @@ lv_obj_t* create_list_item(lv_obj_t* parent,
     lv_obj_set_size(item, LV_PCT(100), 28);
 
     lv_obj_add_flag(item, LV_OBJ_FLAG_CLICKABLE);
-    make_non_scrollable(item);
+    ::ui::components::two_pane_layout::make_non_scrollable(item);
 
     style::apply_list_item(item);
 

@@ -50,7 +50,7 @@ enum class ContactsMode
 struct ContactsPageState
 {
     lv_obj_t* root = nullptr;
-    lv_obj_t* page = nullptr; // Content container (second column)
+    lv_obj_t* page = nullptr; // Main content row container
 
     ::ui::widgets::TopBar top_bar;
 
@@ -62,24 +62,14 @@ struct ContactsPageState
     lv_obj_t* team_btn = nullptr;
     lv_obj_t* discover_btn = nullptr;
 
-    // Second column: Node list
+    // Main list column
     lv_obj_t* list_panel = nullptr;
-    lv_obj_t* sub_container = nullptr;    // Container for list items and pagination
-    lv_obj_t* bottom_container = nullptr; // Container for bottom buttons (Prev/Next/Back)
-    std::vector<lv_obj_t*> list_items;    // Contact/Node rows
-    lv_obj_t* prev_btn = nullptr;
-    lv_obj_t* next_btn = nullptr;
-    lv_obj_t* back_btn = nullptr; // Return to first column
-
-    // Third column: Action buttons
-    lv_obj_t* action_panel = nullptr;
-    lv_obj_t* chat_btn = nullptr;
-    lv_obj_t* position_btn = nullptr;
-    lv_obj_t* edit_btn = nullptr;
-    lv_obj_t* del_btn = nullptr;
-    lv_obj_t* add_btn = nullptr;
-    lv_obj_t* info_btn = nullptr;
-    lv_obj_t* action_back_btn = nullptr; // third column back (to list)
+    lv_obj_t* sub_container = nullptr;    // Scrollable list content container
+    lv_obj_t* bottom_container = nullptr; // Auxiliary bottom row for non-scroll modes
+    std::vector<lv_obj_t*> list_items;    // Currently visible list rows
+    lv_obj_t* prev_btn = nullptr;         // Optional pager button
+    lv_obj_t* next_btn = nullptr;         // Optional pager button
+    lv_obj_t* back_btn = nullptr;         // Bottom-row back button for non-scroll modes
 
     // Current state
     ContactsMode current_mode = ContactsMode::Contacts;

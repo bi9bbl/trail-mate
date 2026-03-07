@@ -149,7 +149,15 @@ class MeshCoreAdapter : public IMeshAdapter
         bool advert_is_new = false;
     };
 
+    struct RadioStats
+    {
+        int16_t noise_floor_dbm = 0;
+        uint32_t tx_airtime_ms = 0;
+        uint32_t rx_airtime_ms = 0;
+    };
+
     bool pollEvent(Event* out);
+    RadioStats getRadioStats() const;
 
     bool ensurePeerPublicKey(const uint8_t* pubkey, size_t len, bool verified);
 
@@ -281,6 +289,9 @@ class MeshCoreAdapter : public IMeshAdapter
     uint8_t self_hash_;
     float last_rx_rssi_;
     float last_rx_snr_;
+    int16_t last_noise_floor_dbm_ = 0;
+    uint32_t tx_airtime_ms_ = 0;
+    uint32_t rx_airtime_ms_ = 0;
     MeshCoreIdentity identity_;
     uint32_t last_auto_discover_ms_ = 0;
     uint8_t last_auto_discover_hash_ = 0;

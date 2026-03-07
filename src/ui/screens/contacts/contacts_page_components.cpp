@@ -1,6 +1,6 @@
 /**
  * @file contacts_page_components.cpp
- * @brief Contacts page UI components implementation (refactor: layout/styles split, behavior preserved)
+ * @brief Contacts page behavior implementation on top of shared layout/styles
  */
 
 #include <Arduino.h> // Must be first for library compilation
@@ -47,6 +47,7 @@ static constexpr int kItemsPerPage = 4;
 static constexpr int kButtonHeight = 28;
 static constexpr int kBottomBtnMinWidth = 50;
 static constexpr int kBottomBtnPadH = 8;
+static constexpr intptr_t kBackListItemUserData = -2;
 
 // UI color tokens (must align with docs/skyplot.md)
 static constexpr uint32_t kColorAmber = 0xEBA341;
@@ -71,14 +72,13 @@ static uint32_t s_last_sent_ts = 0;
 static uint32_t s_team_msg_id = 1;
 
 // --- Forward declarations (same behavior as original) ---
-static void contacts_btn_event_handler(lv_event_t* e);
-static void nearby_btn_event_handler(lv_event_t* e);
 static std::string format_time_status(uint32_t last_seen);
 static std::string format_snr(float snr);
 
 static void on_filter_focused(lv_event_t* e);
 static void on_filter_clicked(lv_event_t* e);
 static void on_list_item_clicked(lv_event_t* e);
+static void on_list_item_focused(lv_event_t* e);
 static void on_prev_clicked(lv_event_t* e);
 static void on_next_clicked(lv_event_t* e);
 static void on_back_clicked(lv_event_t* e);
@@ -578,7 +578,7 @@ void create_filter_panel(lv_obj_t* parent)
     // - Rotate in Filter column triggers FOCUSED -> switch mode + refresh
     // - Press in Filter column:
     //    * on TopBar back -> exit (handled by topbar)
-    //    * on Contacts/Nearby -> move focus to List column
+    //    * on a mode button -> move focus to the List column
     if (g_contacts_state.contacts_btn)
     {
         lv_obj_add_event_cb(g_contacts_state.contacts_btn, on_filter_focused, LV_EVENT_FOCUSED, nullptr);
@@ -610,42 +610,7 @@ void create_filter_panel(lv_obj_t* parent)
     refresh_filter_checked_state();
 }
 
-void create_list_panel(lv_obj_t* parent)
-{
-    contacts::ui::layout::create_list_panel(parent);
-}
-
-void create_action_panel(lv_obj_t* parent)
-{
-    contacts::ui::layout::create_action_panel(parent);
-    // Buttons will be created/updated in refresh_ui() based on selected item (unchanged)
-}
-
 // ---------------- Filter handlers (unchanged behavior) ----------------
-
-static void contacts_btn_event_handler(lv_event_t* e)
-{
-    lv_event_code_t code = lv_event_get_code(e);
-    if (code == LV_EVENT_CLICKED)
-    {
-        CONTACTS_LOG("[Contacts] Contacts button clicked\n");
-        g_contacts_state.current_mode = ContactsMode::Contacts;
-        g_contacts_state.current_page = 0; // Reset to first page
-        refresh_ui();
-    }
-}
-
-static void nearby_btn_event_handler(lv_event_t* e)
-{
-    lv_event_code_t code = lv_event_get_code(e);
-    if (code == LV_EVENT_CLICKED)
-    {
-        CONTACTS_LOG("[Contacts] Nearby button clicked\n");
-        g_contacts_state.current_mode = ContactsMode::Nearby;
-        g_contacts_state.current_page = 0; // Reset to first page
-        refresh_ui();
-    }
-}
 
 static void on_filter_focused(lv_event_t* e)
 {
@@ -698,6 +663,12 @@ static void on_list_item_clicked(lv_event_t* e)
 {
     lv_obj_t* item = (lv_obj_t*)lv_event_get_target(e);
     g_contacts_state.selected_index = (int)(intptr_t)lv_obj_get_user_data(item);
+    if (g_contacts_state.selected_index == static_cast<int>(kBackListItemUserData))
+    {
+        g_contacts_state.selected_index = -1;
+        contacts_focus_to_filter();
+        return;
+    }
     if (g_contacts_state.current_mode == ContactsMode::Discover)
     {
         execute_discovery_command(static_cast<uint8_t>(g_contacts_state.selected_index));
@@ -713,6 +684,20 @@ static void on_list_item_clicked(lv_event_t* e)
         }
     }
     open_action_menu_modal();
+}
+
+static void on_list_item_focused(lv_event_t* e)
+{
+    if (!e)
+    {
+        return;
+    }
+    lv_obj_t* item = (lv_obj_t*)lv_event_get_target(e);
+    if (!item || !lv_obj_is_valid(item))
+    {
+        return;
+    }
+    lv_obj_scroll_to_view(item, LV_ANIM_OFF);
 }
 
 static void on_prev_clicked(lv_event_t* /*e*/)
@@ -2321,13 +2306,24 @@ void refresh_ui()
 
     g_contacts_state.total_items = current_list->size();
 
+    const bool use_scroll_list =
+        (g_contacts_state.current_mode == ContactsMode::Contacts) ||
+        (g_contacts_state.current_mode == ContactsMode::Nearby) ||
+        (g_contacts_state.current_mode == ContactsMode::Broadcast) ||
+        (g_contacts_state.current_mode == ContactsMode::Discover);
+    const bool append_back_item = use_scroll_list;
+    if (append_back_item)
+    {
+        g_contacts_state.total_items += 1;
+    }
+
     if (g_contacts_state.selected_index >= static_cast<int>(g_contacts_state.total_items))
     {
         g_contacts_state.selected_index = -1;
     }
 
     // Pagination calc (unchanged)
-    int total_pages = (static_cast<int>(g_contacts_state.total_items) + kItemsPerPage - 1) / kItemsPerPage;
+    int total_pages = use_scroll_list ? 1 : (static_cast<int>(g_contacts_state.total_items) + kItemsPerPage - 1) / kItemsPerPage;
     if (total_pages == 0) total_pages = 1;
 
     if (g_contacts_state.current_page >= total_pages)
@@ -2339,11 +2335,11 @@ void refresh_ui()
         g_contacts_state.current_page = 0;
     }
 
-    int start_idx = g_contacts_state.current_page * kItemsPerPage;
-    int end_idx = start_idx + kItemsPerPage;
-    if (end_idx > static_cast<int>(g_contacts_state.total_items))
+    int start_idx = use_scroll_list ? 0 : (g_contacts_state.current_page * kItemsPerPage);
+    int end_idx = use_scroll_list ? static_cast<int>(current_list->size()) : (start_idx + kItemsPerPage);
+    if (end_idx > static_cast<int>(current_list->size()))
     {
-        end_idx = static_cast<int>(g_contacts_state.total_items);
+        end_idx = static_cast<int>(current_list->size());
     }
 
     // Create list items for current page (structure in layout; status string computed here)
@@ -2412,6 +2408,21 @@ void refresh_ui()
 
         // Clicking a list row opens the action menu.
         lv_obj_add_event_cb(item, on_list_item_clicked, LV_EVENT_CLICKED, nullptr);
+        lv_obj_add_event_cb(item, on_list_item_focused, LV_EVENT_FOCUSED, nullptr);
+    }
+
+    if (append_back_item)
+    {
+        chat::contacts::NodeInfo back_node{};
+        back_node.display_name = "Back";
+        lv_obj_t* back_item = contacts::ui::layout::create_list_item(
+            g_contacts_state.sub_container,
+            back_node,
+            g_contacts_state.current_mode,
+            "Return");
+        lv_obj_set_user_data(back_item, reinterpret_cast<void*>(kBackListItemUserData));
+        lv_obj_add_event_cb(back_item, on_list_item_clicked, LV_EVENT_CLICKED, nullptr);
+        lv_obj_add_event_cb(back_item, on_list_item_focused, LV_EVENT_FOCUSED, nullptr);
     }
 
     // Create bottom buttons (create once; width follows label text)
@@ -2442,8 +2453,20 @@ void refresh_ui()
             on_back_clicked);
     }
 
+    if (g_contacts_state.bottom_container)
+    {
+        if (use_scroll_list)
+        {
+            lv_obj_add_flag(g_contacts_state.bottom_container, LV_OBJ_FLAG_HIDDEN);
+        }
+        else
+        {
+            lv_obj_clear_flag(g_contacts_state.bottom_container, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+
     // Enable/disable buttons based on pagination (unchanged from original)
-    if (total_pages > 1)
+    if (!use_scroll_list && total_pages > 1)
     {
         lv_obj_clear_state(g_contacts_state.prev_btn, LV_STATE_DISABLED);
         lv_obj_clear_state(g_contacts_state.next_btn, LV_STATE_DISABLED);
@@ -2462,13 +2485,27 @@ void refresh_ui()
     {
         lv_obj_scroll_to_y(g_contacts_state.list_panel, 0, LV_ANIM_OFF);
         lv_obj_invalidate(g_contacts_state.list_panel);
-        lv_obj_add_flag(g_contacts_state.list_panel, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_set_scrollbar_mode(g_contacts_state.list_panel, LV_SCROLLBAR_MODE_AUTO);
+        if (use_scroll_list)
+        {
+            lv_obj_clear_flag(g_contacts_state.list_panel, LV_OBJ_FLAG_SCROLLABLE);
+            lv_obj_set_scrollbar_mode(g_contacts_state.list_panel, LV_SCROLLBAR_MODE_OFF);
+        }
+        else
+        {
+            lv_obj_add_flag(g_contacts_state.list_panel, LV_OBJ_FLAG_SCROLLABLE);
+            lv_obj_set_scrollbar_mode(g_contacts_state.list_panel, LV_SCROLLBAR_MODE_AUTO);
+        }
     }
     if (g_contacts_state.sub_container)
     {
         lv_obj_add_flag(g_contacts_state.sub_container, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_set_scrollbar_mode(g_contacts_state.sub_container, LV_SCROLLBAR_MODE_OFF);
+        lv_obj_set_scroll_dir(g_contacts_state.sub_container, LV_DIR_VER);
+        lv_obj_set_scrollbar_mode(g_contacts_state.sub_container,
+                                  use_scroll_list ? LV_SCROLLBAR_MODE_AUTO : LV_SCROLLBAR_MODE_OFF);
+        if (use_scroll_list)
+        {
+            lv_obj_scroll_to_y(g_contacts_state.sub_container, 0, LV_ANIM_OFF);
+        }
     }
     s_refreshing_ui = false;
     contacts_input_on_ui_refreshed();

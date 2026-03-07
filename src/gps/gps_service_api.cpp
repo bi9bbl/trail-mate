@@ -20,6 +20,16 @@ uint32_t gps_get_last_motion_ms()
     return GpsService::getInstance().getLastMotionMs();
 }
 
+bool gps_is_enabled()
+{
+    return GpsService::getInstance().isEnabled();
+}
+
+bool gps_is_powered()
+{
+    return GpsService::getInstance().isPowered();
+}
+
 void gps_set_collection_interval(uint32_t interval_ms)
 {
     GpsService::getInstance().setCollectionInterval(interval_ms);

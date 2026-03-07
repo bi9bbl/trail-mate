@@ -8,6 +8,7 @@
 #include "ble_manager.h"
 #include <NimBLEDevice.h>
 #include <array>
+#include <atomic>
 #include <deque>
 #include <string>
 #include <vector>
@@ -32,6 +33,7 @@ class MeshCoreBleService : public BleService,
 
   private:
     friend class MeshCoreRxCallbacks;
+    friend class MeshCoreTxCallbacks;
     friend class MeshCoreServerCallbacks;
 
     struct Frame
@@ -61,6 +63,10 @@ class MeshCoreBleService : public BleService,
     NimBLECharacteristic* rx_char_ = nullptr;
     NimBLECharacteristic* tx_char_ = nullptr;
     bool connected_ = false;
+    bool tx_subscribed_ = false;
+    uint16_t conn_handle_ = 0;
+    bool conn_handle_valid_ = false;
+    uint16_t negotiated_mtu_ = 23;
 
     std::deque<Frame> outbound_;
     std::deque<Frame> rx_queue_;
@@ -89,6 +95,16 @@ class MeshCoreBleService : public BleService,
     std::vector<uint8_t> sign_data_;
     bool sign_active_ = false;
     uint32_t ble_pin_ = 0;
+    uint32_t active_ble_pin_ = 0;
+    std::atomic<uint32_t> pending_passkey_{0};
+    int16_t last_rssi_dbm_x10_ = 0;
+    int16_t last_snr_db_x10_ = 0;
+    uint32_t stats_tx_packets_ = 0;
+    uint32_t stats_rx_packets_ = 0;
+    uint32_t stats_tx_flood_ = 0;
+    uint32_t stats_tx_direct_ = 0;
+    uint32_t stats_rx_flood_ = 0;
+    uint32_t stats_rx_direct_ = 0;
     int32_t advert_lat_ = 0;
     int32_t advert_lon_ = 0;
     uint32_t pending_login_ = 0;
@@ -119,6 +135,15 @@ class MeshCoreBleService : public BleService,
     void saveManualContacts();
     void loadBlePin();
     void saveBlePin();
+    uint32_t effectiveBlePin() const;
+    void refreshBlePin();
+    void noteLinkStats(int16_t rssi_dbm_x10, int16_t snr_db_x10);
+    void noteRxMeta(const chat::RxMeta& rx_meta);
+    void noteEventRx(int8_t rssi_dbm, int8_t snr_qdb);
+    void noteSentRoute(bool sent_flood);
+    void enqueueRawDataPush(const uint8_t* payload, size_t len, const chat::RxMeta* meta);
+    bool handleCustomVarSet(const char* key, const char* value);
+    void appendCustomVar(std::string& out, const char* key, const char* value) const;
     ContactRecord* findManualContact(const uint8_t* pubkey);
     const ContactRecord* findManualContactByPrefix(const uint8_t* prefix, size_t len) const;
     bool resolveContactByPubkey(const uint8_t* pubkey,

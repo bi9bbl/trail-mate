@@ -377,6 +377,14 @@ uint32_t estimateSendTimeoutMs(size_t frame_len, size_t path_len, bool flood,
            static_cast<uint32_t>(perhop * static_cast<float>(path_len + 1));
 }
 
+uint32_t saturatingAddU32(uint32_t base, uint32_t delta)
+{
+    const uint64_t total = static_cast<uint64_t>(base) + static_cast<uint64_t>(delta);
+    return (total > static_cast<uint64_t>(std::numeric_limits<uint32_t>::max()))
+               ? std::numeric_limits<uint32_t>::max()
+               : static_cast<uint32_t>(total);
+}
+
 float scoreFromSnr(float snr, uint8_t sf, size_t packet_len)
 {
     static const float kSnrThreshold[] = {-7.5f, -10.0f, -12.5f, -15.0f, -17.5f, -20.0f};
@@ -1113,7 +1121,10 @@ MeshCoreAdapter::MeshCoreAdapter(LoraBoard& board)
       node_id_(0),
       self_hash_(0),
       last_rx_rssi_(NAN),
-      last_rx_snr_(NAN)
+      last_rx_snr_(NAN),
+      last_noise_floor_dbm_(0),
+      tx_airtime_ms_(0),
+      rx_airtime_ms_(0)
 {
     const uint64_t raw = ESP.getEfuseMac();
     const uint8_t* mac = reinterpret_cast<const uint8_t*>(&raw);
@@ -1146,6 +1157,15 @@ bool MeshCoreAdapter::pollEvent(Event* out)
     *out = std::move(events_.front());
     events_.pop_front();
     return true;
+}
+
+MeshCoreAdapter::RadioStats MeshCoreAdapter::getRadioStats() const
+{
+    RadioStats stats;
+    stats.noise_floor_dbm = last_noise_floor_dbm_;
+    stats.tx_airtime_ms = tx_airtime_ms_;
+    stats.rx_airtime_ms = rx_airtime_ms_;
+    return stats;
 }
 
 bool MeshCoreAdapter::ensurePeerPublicKey(const uint8_t* pubkey, size_t len, bool verified)
@@ -2455,6 +2475,14 @@ bool MeshCoreAdapter::transmitFrameNow(const uint8_t* data, size_t len, uint32_t
         return false;
     }
 
+    const float air_ms_f = estimateLoRaAirtimeMs(len,
+                                                 config_.meshcore_bw_khz,
+                                                 config_.meshcore_sf,
+                                                 config_.meshcore_cr);
+    const uint32_t air_ms = (air_ms_f > 0.0f && std::isfinite(air_ms_f))
+                                ? static_cast<uint32_t>(std::lround(air_ms_f))
+                                : 0U;
+
     int state = RADIOLIB_ERR_UNSUPPORTED;
 #if defined(ARDUINO_LILYGO_LORA_SX1262) || defined(ARDUINO_LILYGO_LORA_SX1280)
     state = board_.transmitRadio(data, len);
@@ -2469,6 +2497,7 @@ bool MeshCoreAdapter::transmitFrameNow(const uint8_t* data, size_t len, uint32_t
             hasSeenSignature(packet_sig, now_ms);
         }
         last_tx_ms_ = now_ms;
+        tx_airtime_ms_ = saturatingAddU32(tx_airtime_ms_, air_ms);
         int rx_state = board_.startRadioReceive();
         if (rx_state != RADIOLIB_ERR_NONE)
         {
@@ -4067,6 +4096,10 @@ void MeshCoreAdapter::setLastRxStats(float rssi, float snr)
 {
     last_rx_rssi_ = rssi;
     last_rx_snr_ = snr;
+    if (std::isfinite(rssi) && std::isfinite(snr))
+    {
+        last_noise_floor_dbm_ = static_cast<int16_t>(std::lround(rssi - snr));
+    }
 }
 
 bool MeshCoreAdapter::isReady() const
@@ -4105,6 +4138,17 @@ void MeshCoreAdapter::handleRawPacketInternal(const uint8_t* data, size_t size, 
         MESHCORE_LOG("[MESHCORE] RX drop invalid frame len=%u\n",
                      static_cast<unsigned>(size));
         return;
+    }
+
+    const float air_ms_f = estimateLoRaAirtimeMs(size,
+                                                 config_.meshcore_bw_khz,
+                                                 config_.meshcore_sf,
+                                                 config_.meshcore_cr);
+    if (air_ms_f > 0.0f && std::isfinite(air_ms_f))
+    {
+        rx_airtime_ms_ = saturatingAddU32(
+            rx_airtime_ms_,
+            static_cast<uint32_t>(std::lround(air_ms_f)));
     }
 
     const uint8_t header = data[0];

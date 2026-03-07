@@ -56,6 +56,123 @@ constexpr uint8_t kLoraSyncWord = 0x2b;
 constexpr uint16_t kLoraPreambleLen = 16;
 constexpr uint8_t kBitfieldWantResponseMask = 0x02;
 constexpr size_t kMaxMqttProxyQueue = 12;
+constexpr uint32_t kBroadcastNodeId = 0xFFFFFFFFu;
+constexpr size_t kTraceRouteSlots = 8;
+
+bool shouldSetAirWantAck(uint32_t dest, bool want_ack)
+{
+    return want_ack && dest != kBroadcastNodeId;
+}
+
+uint8_t computeHopsAway(uint8_t flags);
+
+void selectTraceRouteArrays(meshtastic_RouteDiscovery* route,
+                            bool towards_destination,
+                            pb_size_t** route_count,
+                            uint32_t** route_nodes,
+                            pb_size_t** snr_count,
+                            int8_t** snr_values)
+{
+    if (towards_destination)
+    {
+        *route_count = &route->route_count;
+        *route_nodes = route->route;
+        *snr_count = &route->snr_towards_count;
+        *snr_values = route->snr_towards;
+    }
+    else
+    {
+        *route_count = &route->route_back_count;
+        *route_nodes = route->route_back;
+        *snr_count = &route->snr_back_count;
+        *snr_values = route->snr_back;
+    }
+}
+
+int8_t encodeTraceRouteSnr(const chat::RxMeta* rx_meta)
+{
+    if (!rx_meta)
+    {
+        return 0;
+    }
+
+    const long scaled = std::lround((static_cast<float>(rx_meta->snr_db_x10) / 10.0f) * 4.0f);
+    const long min_v = static_cast<long>(std::numeric_limits<int8_t>::min());
+    const long max_v = static_cast<long>(std::numeric_limits<int8_t>::max());
+    const long clamped = (scaled < min_v) ? min_v : ((scaled > max_v) ? max_v : scaled);
+    return static_cast<int8_t>(clamped);
+}
+
+void insertTraceRouteUnknownHops(uint8_t flags,
+                                 meshtastic_RouteDiscovery* route,
+                                 bool towards_destination)
+{
+    if (!route)
+    {
+        return;
+    }
+
+    pb_size_t* route_count = nullptr;
+    uint32_t* route_nodes = nullptr;
+    pb_size_t* snr_count = nullptr;
+    int8_t* snr_values = nullptr;
+    selectTraceRouteArrays(route, towards_destination, &route_count, &route_nodes, &snr_count, &snr_values);
+
+    const uint8_t hops_taken = computeHopsAway(flags);
+    if (hops_taken == 0xFF)
+    {
+        return;
+    }
+
+    int route_missing = static_cast<int>(hops_taken) - static_cast<int>(*route_count);
+    while (route_missing-- > 0 && *route_count < kTraceRouteSlots)
+    {
+        route_nodes[*route_count] = kBroadcastNodeId;
+        *route_count += 1;
+    }
+
+    int snr_missing = static_cast<int>(*route_count) - static_cast<int>(*snr_count);
+    while (snr_missing-- > 0 && *snr_count < kTraceRouteSlots)
+    {
+        snr_values[*snr_count] = std::numeric_limits<int8_t>::min();
+        *snr_count += 1;
+    }
+}
+
+void appendTraceRouteNodeAndSnr(meshtastic_RouteDiscovery* route,
+                                uint32_t node_id,
+                                const chat::RxMeta* rx_meta,
+                                bool towards_destination,
+                                bool snr_only)
+{
+    if (!route)
+    {
+        return;
+    }
+
+    pb_size_t* route_count = nullptr;
+    uint32_t* route_nodes = nullptr;
+    pb_size_t* snr_count = nullptr;
+    int8_t* snr_values = nullptr;
+    selectTraceRouteArrays(route, towards_destination, &route_count, &route_nodes, &snr_count, &snr_values);
+
+    if (*snr_count < kTraceRouteSlots)
+    {
+        snr_values[*snr_count] = encodeTraceRouteSnr(rx_meta);
+        *snr_count += 1;
+    }
+
+    if (snr_only)
+    {
+        return;
+    }
+
+    if (*route_count < kTraceRouteSlots)
+    {
+        route_nodes[*route_count] = node_id;
+        *route_count += 1;
+    }
+}
 
 bool readPbString(pb_istream_t* stream, char* out, size_t out_len)
 {
@@ -872,8 +989,9 @@ bool MtAdapter::sendAppData(ChannelId channel, uint32_t portnum,
     size_t psk_len =
         (out_channel == ChannelId::SECONDARY) ? secondary_psk_len_ : primary_psk_len_;
     uint8_t hop_limit = config_.hop_limit;
-    uint32_t dest_node = (dest != 0) ? dest : 0xFFFFFFFF;
-    bool want_ack_flag = want_ack;
+    uint32_t dest_node = (dest != 0) ? dest : kBroadcastNodeId;
+    bool track_ack = want_ack;
+    bool air_want_ack = shouldSetAirWantAck(dest_node, track_ack);
     MessageId msg_id = (packet_id != 0) ? packet_id : next_packet_id_++;
     if (packet_id != 0 && packet_id >= next_packet_id_)
     {
@@ -910,7 +1028,8 @@ bool MtAdapter::sendAppData(ChannelId channel, uint32_t portnum,
         out_payload = pki_buf;
         out_len = pki_len;
         channel_hash = 0; // PKI channel
-        want_ack_flag = true;
+        track_ack = true;
+        air_want_ack = true;
         psk = nullptr;
         psk_len = 0;
         use_pki = true;
@@ -931,7 +1050,7 @@ bool MtAdapter::sendAppData(ChannelId channel, uint32_t portnum,
     }
 
     if (!buildWirePacket(out_payload, out_len, node_id_, msg_id,
-                         dest_node, channel_hash, hop_limit, want_ack_flag,
+                         dest_node, channel_hash, hop_limit, air_want_ack,
                          psk, psk_len, wire_buffer, &wire_size))
     {
         return false;
@@ -951,16 +1070,17 @@ bool MtAdapter::sendAppData(ChannelId channel, uint32_t portnum,
 #endif
 
     bool ok = (state == RADIOLIB_ERR_NONE);
-    LORA_LOG("[LORA] TX app port=%u len=%u want_resp=%u want_ack=%u ok=%d\n",
+    LORA_LOG("[LORA] TX app port=%u len=%u want_resp=%u air_ack=%u track_ack=%u ok=%d\n",
              (unsigned)portnum,
              (unsigned)wire_size,
              effective_want_response ? 1U : 0U,
-             want_ack_flag ? 1U : 0U,
+             air_want_ack ? 1U : 0U,
+             track_ack ? 1U : 0U,
              ok ? 1 : 0);
     if (ok)
     {
         last_tx_ms_ = now_ms;
-        if (want_ack_flag)
+        if (track_ack)
         {
             pending_ack_ms_[msg_id] = millis();
             pending_ack_dest_[msg_id] = dest_node;
@@ -1017,7 +1137,7 @@ bool MtAdapter::sendMeshPacket(const meshtastic_MeshPacket& packet)
     }
 
     meshtastic_Data data = packet.decoded;
-    data.dest = (packet.to != 0) ? packet.to : 0xFFFFFFFF;
+    data.dest = (packet.to != 0) ? packet.to : kBroadcastNodeId;
     data.source = node_id_;
     data.has_bitfield = true;
 
@@ -1031,7 +1151,8 @@ bool MtAdapter::sendMeshPacket(const meshtastic_MeshPacket& packet)
 
     const uint32_t dest = data.dest;
     const uint8_t hop_limit = (packet.hop_limit > 0) ? packet.hop_limit : config_.hop_limit;
-    bool want_ack = packet.want_ack;
+    bool track_ack = packet.want_ack;
+    bool air_want_ack = shouldSetAirWantAck(dest, track_ack);
     uint8_t channel_hash = primary_channel_hash_;
     const uint8_t* psk = primary_psk_;
     size_t psk_len = primary_psk_len_;
@@ -1078,7 +1199,8 @@ bool MtAdapter::sendMeshPacket(const meshtastic_MeshPacket& packet)
         channel_hash = 0;
         psk = nullptr;
         psk_len = 0;
-        want_ack = true;
+        track_ack = true;
+        air_want_ack = true;
     }
     else if (packet.channel == 1)
     {
@@ -1095,7 +1217,7 @@ bool MtAdapter::sendMeshPacket(const meshtastic_MeshPacket& packet)
     uint8_t wire_buffer[512];
     size_t wire_size = sizeof(wire_buffer);
     if (!buildWirePacket(out_payload, out_len, node_id_, msg_id,
-                         dest, channel_hash, hop_limit, want_ack,
+                         dest, channel_hash, hop_limit, air_want_ack,
                          psk, psk_len, wire_buffer, &wire_size))
     {
         last_send_error_ = meshtastic_Routing_Error_TOO_LARGE;
@@ -1112,7 +1234,7 @@ bool MtAdapter::sendMeshPacket(const meshtastic_MeshPacket& packet)
     {
         last_tx_ms_ = now_ms;
         last_send_error_ = meshtastic_Routing_Error_NONE;
-        if (want_ack)
+        if (track_ack)
         {
             pending_ack_ms_[msg_id] = millis();
             pending_ack_dest_[msg_id] = dest;
@@ -2320,6 +2442,7 @@ void MtAdapter::processReceivedPacket(const uint8_t* data, size_t size)
                              decoded.portnum == meshtastic_PortNum_TEXT_MESSAGE_COMPRESSED_APP);
         bool is_nodeinfo_port = (decoded.portnum == meshtastic_PortNum_NODEINFO_APP);
         bool is_position_port = (decoded.portnum == meshtastic_PortNum_POSITION_APP);
+        bool is_traceroute_port = (decoded.portnum == meshtastic_PortNum_TRACEROUTE_APP);
         ChannelId channel_id =
             (header.channel == secondary_channel_hash_) ? ChannelId::SECONDARY : ChannelId::PRIMARY;
         if (header.channel != 0 && header.from != node_id_)
@@ -2342,6 +2465,16 @@ void MtAdapter::processReceivedPacket(const uint8_t* data, size_t size)
                          (unsigned long)header.id,
                          static_cast<unsigned>(decoded.portnum));
             }
+        }
+
+        if (is_traceroute_port)
+        {
+            handleTraceRoutePacket(header,
+                                   &decoded,
+                                   &rx_meta,
+                                   channel_id,
+                                   want_ack_flag,
+                                   want_response);
         }
 
         if (want_response && to_us_or_broadcast)
@@ -2595,7 +2728,7 @@ bool MtAdapter::sendPacket(const PendingSend& pending)
     std::string data_hex = toHex(data_buffer, data_size, data_size);
     LORA_LOG("[LORA] TX data protobuf hex: %s\n", data_hex.c_str());
 
-    // Build full wire packet (like M5Tab5-GPS)
+    // Build a full Meshtastic-compatible wire packet
     uint8_t wire_buffer[512];
     size_t wire_size = sizeof(wire_buffer);
 
@@ -2603,8 +2736,9 @@ bool MtAdapter::sendPacket(const PendingSend& pending)
     uint8_t channel_hash =
         (channel == ChannelId::SECONDARY) ? secondary_channel_hash_ : primary_channel_hash_;
     uint8_t hop_limit = config_.hop_limit;
-    uint32_t dest = (pending.dest != 0) ? pending.dest : 0xFFFFFFFF;
-    bool want_ack = true;
+    uint32_t dest = (pending.dest != 0) ? pending.dest : kBroadcastNodeId;
+    bool track_ack = true;
+    bool air_want_ack = shouldSetAirWantAck(dest, track_ack);
 
     // Try PKI encryption for direct messages when key is known
     const uint8_t* payload = data_buffer;
@@ -2632,7 +2766,8 @@ bool MtAdapter::sendPacket(const PendingSend& pending)
         payload = pki_buf;
         payload_len = pki_len;
         channel_hash = 0; // PKI channel
-        want_ack = true;
+        track_ack = true;
+        air_want_ack = true;
         use_pki = true;
     }
 
@@ -2665,15 +2800,16 @@ bool MtAdapter::sendPacket(const PendingSend& pending)
              (unsigned long)dest);
 
     if (!buildWirePacket(payload, payload_len, from_node, pending.msg_id,
-                         dest, channel_hash, hop_limit, want_ack,
+                         dest, channel_hash, hop_limit, air_want_ack,
                          psk, psk_len, wire_buffer, &wire_size))
     {
         return false;
     }
-    LORA_LOG("[LORA] TX wire ch=0x%02X hop=%u ack=%d psk=%u wire=%u dest=%08lX\n",
+    LORA_LOG("[LORA] TX wire ch=0x%02X hop=%u air_ack=%d track_ack=%d psk=%u wire=%u dest=%08lX\n",
              channel_hash,
              hop_limit,
-             want_ack ? 1 : 0,
+             air_want_ack ? 1 : 0,
+             track_ack ? 1 : 0,
              (unsigned)psk_len,
              (unsigned)wire_size,
              (unsigned long)dest);
@@ -2702,7 +2838,7 @@ bool MtAdapter::sendPacket(const PendingSend& pending)
              static_cast<unsigned>(channel),
              (unsigned)wire_size,
              ok ? 1 : 0);
-    if (ok && want_ack)
+    if (ok && track_ack)
     {
         pending_ack_ms_[pending.msg_id] = millis();
         pending_ack_dest_[pending.msg_id] = dest;
@@ -2768,8 +2904,6 @@ bool MtAdapter::sendNodeInfoTo(uint32_t dest, bool want_response, ChannelId chan
     hw_model = meshtastic_HardwareModel_T_DECK;
 #elif defined(ARDUINO_LILYGO_TWATCH_S3)
     hw_model = meshtastic_HardwareModel_T_WATCH_S3;
-#elif defined(ARDUINO_M5STACK_TAB5)
-    hw_model = meshtastic_HardwareModel_MESH_TAB;
 #elif defined(ARDUINO_LILYGO_LORA_SX1262) || defined(ARDUINO_LILYGO_LORA_SX1280)
     hw_model = meshtastic_HardwareModel_T_LORA_PAGER;
 #endif
@@ -2855,6 +2989,108 @@ bool MtAdapter::sendPositionTo(uint32_t dest, ChannelId channel)
                        payload_len,
                        dest,
                        false);
+}
+
+bool MtAdapter::sendTraceRouteResponse(uint32_t dest,
+                                       uint32_t request_id,
+                                       const meshtastic_RouteDiscovery& route,
+                                       ChannelId channel,
+                                       bool want_ack)
+{
+    meshtastic_MeshPacket packet = meshtastic_MeshPacket_init_zero;
+    packet.to = dest;
+    packet.channel = (channel == ChannelId::SECONDARY) ? 1 : 0;
+    packet.hop_limit = config_.hop_limit;
+    packet.want_ack = want_ack;
+    packet.which_payload_variant = meshtastic_MeshPacket_decoded_tag;
+    packet.decoded = meshtastic_Data_init_default;
+    packet.decoded.portnum = meshtastic_PortNum_TRACEROUTE_APP;
+    packet.decoded.want_response = false;
+    packet.decoded.request_id = request_id;
+    packet.decoded.has_bitfield = true;
+    packet.decoded.bitfield = 0;
+
+    pb_ostream_t ostream =
+        pb_ostream_from_buffer(packet.decoded.payload.bytes, sizeof(packet.decoded.payload.bytes));
+    if (!pb_encode(&ostream, meshtastic_RouteDiscovery_fields, &route))
+    {
+        LORA_LOG("[LORA] traceroute response encode fail req=%08lX err=%s\n",
+                 (unsigned long)request_id,
+                 PB_GET_ERROR(&ostream));
+        return false;
+    }
+
+    packet.decoded.payload.size = static_cast<pb_size_t>(ostream.bytes_written);
+    return sendMeshPacket(packet);
+}
+
+bool MtAdapter::handleTraceRoutePacket(const PacketHeaderWire& header,
+                                       meshtastic_Data* decoded,
+                                       const chat::RxMeta* rx_meta,
+                                       ChannelId channel,
+                                       bool want_ack_flag,
+                                       bool want_response)
+{
+    if (!decoded || decoded->portnum != meshtastic_PortNum_TRACEROUTE_APP || decoded->payload.size == 0)
+    {
+        return false;
+    }
+
+    meshtastic_RouteDiscovery route = meshtastic_RouteDiscovery_init_zero;
+    pb_istream_t istream = pb_istream_from_buffer(decoded->payload.bytes, decoded->payload.size);
+    if (!pb_decode(&istream, meshtastic_RouteDiscovery_fields, &route))
+    {
+        LORA_LOG("[LORA] traceroute decode fail from=%08lX err=%s\n",
+                 (unsigned long)header.from,
+                 PB_GET_ERROR(&istream));
+        return false;
+    }
+
+    const bool is_response = decoded->request_id != 0;
+    const bool is_broadcast = header.to == kBroadcastNodeId;
+    const bool to_us = header.to == node_id_;
+
+    insertTraceRouteUnknownHops(header.flags, &route, !is_response);
+    appendTraceRouteNodeAndSnr(&route, node_id_, rx_meta, !is_response, to_us);
+
+    pb_ostream_t ostream = pb_ostream_from_buffer(decoded->payload.bytes, sizeof(decoded->payload.bytes));
+    if (!pb_encode(&ostream, meshtastic_RouteDiscovery_fields, &route))
+    {
+        LORA_LOG("[LORA] traceroute re-encode fail from=%08lX err=%s\n",
+                 (unsigned long)header.from,
+                 PB_GET_ERROR(&ostream));
+        return false;
+    }
+    decoded->payload.size = static_cast<pb_size_t>(ostream.bytes_written);
+
+    if (!is_response && want_response && (to_us || is_broadcast))
+    {
+        const uint8_t hop_limit = header.flags & PACKET_FLAGS_HOP_LIMIT_MASK;
+        const uint8_t hop_start =
+            (header.flags & PACKET_FLAGS_HOP_START_MASK) >> PACKET_FLAGS_HOP_START_SHIFT;
+        const bool ignore_broadcast_request = is_broadcast && hop_limit < hop_start;
+        if (ignore_broadcast_request)
+        {
+            LORA_LOG("[LORA] traceroute reply ignored broadcast req=%08lX hop=%u/%u\n",
+                     (unsigned long)header.id,
+                     static_cast<unsigned>(hop_limit),
+                     static_cast<unsigned>(hop_start));
+        }
+        else if (sendTraceRouteResponse(header.from, header.id, route, channel, want_ack_flag))
+        {
+            LORA_LOG("[LORA] TX traceroute reply to=%08lX req=%08lX\n",
+                     (unsigned long)header.from,
+                     (unsigned long)header.id);
+        }
+        else
+        {
+            LORA_LOG("[LORA] TX traceroute reply fail to=%08lX req=%08lX\n",
+                     (unsigned long)header.from,
+                     (unsigned long)header.id);
+        }
+    }
+
+    return true;
 }
 
 void MtAdapter::maybeBroadcastNodeInfo(uint32_t now_ms)

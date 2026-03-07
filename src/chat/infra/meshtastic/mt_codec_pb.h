@@ -2,7 +2,7 @@
  * @file mt_codec_pb.h
  * @brief Meshtastic protocol codec using protobuf (nanopb)
  *
- * Uses the actual Meshtastic protobuf definitions from M5Tab5-GPS
+ * Uses the Meshtastic protobuf definitions generated into this project
  */
 
 #pragma once
@@ -12,7 +12,7 @@
 #include <stdint.h>
 #include <string>
 
-// Include generated nanopb headers from M5Tab5-GPS
+// Include generated nanopb headers for the Meshtastic protocol
 // Note: pb.h must be included first, and paths are relative to generated/ directory
 #include "meshtastic/channel.pb.h"
 #include "meshtastic/mesh.pb.h"

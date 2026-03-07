@@ -2,7 +2,7 @@
  * @file mt_codec_pb.cpp
  * @brief Meshtastic protocol codec implementation using protobuf
  *
- * Based on M5Tab5-GPS implementation
+ * Based on this project's Meshtastic compatibility implementation
  */
 
 #include "mt_codec_pb.h"
@@ -24,7 +24,7 @@ bool encodeTextMessage(ChannelId channel, const std::string& text,
         return false;
     }
 
-    // Create Data message (like M5Tab5-GPS make_packet_payload)
+    // Create a Meshtastic Data message payload
     meshtastic_Data data = meshtastic_Data_init_default;
     data.portnum = meshtastic_PortNum_TEXT_MESSAGE_APP;
     data.want_response = false;
@@ -71,7 +71,7 @@ bool decodeTextMessage(const uint8_t* buffer, size_t size, MeshIncomingText* out
         return false;
     }
 
-    // Decode Data message (like M5Tab5-GPS)
+    // Decode a Meshtastic Data message payload
     meshtastic_Data data = meshtastic_Data_init_default;
     pb_istream_t stream = pb_istream_from_buffer(buffer, size);
     if (!pb_decode(&stream, meshtastic_Data_fields, &data))

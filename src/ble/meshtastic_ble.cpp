@@ -945,8 +945,6 @@ class MeshtasticBleService::PhoneApi
         return meshtastic_HardwareModel_T_DECK;
 #elif defined(ARDUINO_LILYGO_TWATCH_S3)
         return meshtastic_HardwareModel_T_WATCH_S3;
-#elif defined(ARDUINO_M5STACK_TAB5)
-        return meshtastic_HardwareModel_MESH_TAB;
 #elif defined(ARDUINO_LILYGO_LORA_SX1262) || defined(ARDUINO_LILYGO_LORA_SX1280)
         return meshtastic_HardwareModel_T_LORA_PAGER;
 #else
@@ -1839,6 +1837,55 @@ class MeshtasticBleService::PhoneApi
             ble_log("self nodeinfo reply req_id=%lu resp_id=%lu",
                     static_cast<unsigned long>(packet.id),
                     static_cast<unsigned long>(reply.id));
+            return true;
+        }
+
+        if (packet.decoded.portnum == meshtastic_PortNum_TRACEROUTE_APP && packet.decoded.want_response &&
+            packet.decoded.payload.size > 0)
+        {
+            meshtastic_RouteDiscovery route = meshtastic_RouteDiscovery_init_zero;
+            pb_istream_t req_stream =
+                pb_istream_from_buffer(packet.decoded.payload.bytes, packet.decoded.payload.size);
+            if (!pb_decode(&req_stream, meshtastic_RouteDiscovery_fields, &route))
+            {
+                ble_log("self traceroute decode fail req_id=%lu", static_cast<unsigned long>(packet.id));
+                return false;
+            }
+
+            if (route.snr_towards_count < 8)
+            {
+                route.snr_towards[route.snr_towards_count++] = 0;
+            }
+
+            meshtastic_MeshPacket reply = meshtastic_MeshPacket_init_zero;
+            reply.from = self;
+            reply.to = self;
+            reply.channel = packet.channel;
+            reply.id = normalizePacketId(0);
+            reply.rx_time = nowSeconds();
+            reply.which_payload_variant = meshtastic_MeshPacket_decoded_tag;
+            zeroInit(reply.decoded);
+            reply.decoded.portnum = meshtastic_PortNum_TRACEROUTE_APP;
+            reply.decoded.dest = self;
+            reply.decoded.source = self;
+            reply.decoded.request_id = packet.id;
+            reply.decoded.want_response = false;
+            reply.decoded.has_bitfield = true;
+            reply.decoded.bitfield = 0;
+
+            pb_ostream_t out_stream =
+                pb_ostream_from_buffer(reply.decoded.payload.bytes, sizeof(reply.decoded.payload.bytes));
+            if (!pb_encode(&out_stream, meshtastic_RouteDiscovery_fields, &route))
+            {
+                return false;
+            }
+            reply.decoded.payload.size = static_cast<pb_size_t>(out_stream.bytes_written);
+            packet_queue_.push_back(reply);
+
+            ble_log("self traceroute reply req_id=%lu resp_id=%lu len=%u",
+                    static_cast<unsigned long>(packet.id),
+                    static_cast<unsigned long>(reply.id),
+                    static_cast<unsigned>(reply.decoded.payload.size));
             return true;
         }
 

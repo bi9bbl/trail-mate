@@ -1,258 +1,120 @@
 /**
  * @file settings_page_input.cpp
- * @brief Settings input handling implementation
+ * @brief Settings input handling
  */
 
 #include "settings_page_input.h"
-#include "../../ui_common.h"
+
+#include "../../components/two_pane_nav.h"
 #include "settings_state.h"
-#include <Arduino.h>
 
-namespace settings::ui::input
+namespace settings
 {
-
+namespace ui
+{
+namespace input
+{
 namespace
 {
 
-enum class FocusColumn
-{
-    Filter = 0,
-    List = 1,
-};
+using Adapter = ::ui::components::two_pane_nav::Adapter;
+using BackPlacement = ::ui::components::two_pane_nav::BackPlacement;
 
-static lv_group_t* s_group = nullptr;
-static lv_group_t* s_prev_group = nullptr;
-static lv_indev_t* s_encoder = nullptr;
-static FocusColumn s_col = FocusColumn::Filter;
+static ::ui::components::two_pane_nav::Binding s_binding{};
 
-static lv_indev_t* find_encoder_indev()
+static lv_obj_t* get_key_target(void* /*ctx*/)
 {
-    lv_indev_t* indev = nullptr;
-    while ((indev = lv_indev_get_next(indev)) != nullptr)
-    {
-        if (lv_indev_get_type(indev) == LV_INDEV_TYPE_ENCODER)
-        {
-            return indev;
-        }
-    }
-    return nullptr;
+    return g_state.root ? g_state.root : g_state.list_panel;
 }
 
-static bool is_encoder_active()
+static lv_obj_t* get_top_back_button(void* /*ctx*/)
 {
-    lv_indev_t* indev = lv_indev_get_act();
-    return indev && lv_indev_get_type(indev) == LV_INDEV_TYPE_ENCODER;
+    return g_state.top_bar.back_btn;
 }
 
-static void group_clear_all(lv_group_t* g)
+static size_t get_filter_count(void* /*ctx*/)
 {
-    if (!g) return;
-    lv_group_remove_all_objs(g);
+    return g_state.filter_count;
 }
 
-static void focus_first_valid(lv_obj_t* obj)
+static lv_obj_t* get_filter_button(void* /*ctx*/, size_t index)
 {
-    if (!s_group || !obj || !lv_obj_is_valid(obj)) return;
-    lv_group_focus_obj(obj);
+    return (index < g_state.filter_count) ? g_state.filter_buttons[index] : nullptr;
 }
 
-static void root_key_event_cb(lv_event_t* e);
-
-static void attach_key_handler(lv_obj_t* obj)
+static int get_preferred_filter_index(void* /*ctx*/)
 {
-    if (!obj || !lv_obj_is_valid(obj)) return;
-    lv_obj_remove_event_cb(obj, root_key_event_cb);
-    lv_obj_add_event_cb(obj, root_key_event_cb, LV_EVENT_KEY, nullptr);
+    return g_state.current_category;
 }
 
-static void bind_filter_column()
+static size_t get_list_count(void* /*ctx*/)
 {
-    if (!s_group) return;
-    group_clear_all(s_group);
-
-    if (g_state.top_bar.back_btn)
-    {
-        if (lv_obj_is_valid(g_state.top_bar.back_btn))
-        {
-            lv_group_add_obj(s_group, g_state.top_bar.back_btn);
-            attach_key_handler(g_state.top_bar.back_btn);
-        }
-    }
-
-    for (size_t i = 0; i < g_state.filter_count; ++i)
-    {
-        if (g_state.filter_buttons[i] && lv_obj_is_valid(g_state.filter_buttons[i]))
-        {
-            lv_group_add_obj(s_group, g_state.filter_buttons[i]);
-            attach_key_handler(g_state.filter_buttons[i]);
-        }
-    }
-
-    if (g_state.filter_buttons[g_state.current_category])
-    {
-        focus_first_valid(g_state.filter_buttons[g_state.current_category]);
-    }
-    else if (g_state.top_bar.back_btn)
-    {
-        focus_first_valid(g_state.top_bar.back_btn);
-    }
+    return g_state.item_count;
 }
 
-static void bind_list_column()
+static lv_obj_t* get_list_button(void* /*ctx*/, size_t index)
 {
-    if (!s_group) return;
-    group_clear_all(s_group);
-
-    for (size_t i = 0; i < g_state.item_count; ++i)
-    {
-        if (g_state.item_widgets[i].btn && lv_obj_is_valid(g_state.item_widgets[i].btn))
-        {
-            lv_group_add_obj(s_group, g_state.item_widgets[i].btn);
-            attach_key_handler(g_state.item_widgets[i].btn);
-        }
-    }
-    if (g_state.list_back_btn && lv_obj_is_valid(g_state.list_back_btn))
-    {
-        lv_group_add_obj(s_group, g_state.list_back_btn);
-        attach_key_handler(g_state.list_back_btn);
-    }
-
-    if (g_state.item_count > 0 && g_state.item_widgets[0].btn)
-    {
-        focus_first_valid(g_state.item_widgets[0].btn);
-    }
-    else if (g_state.list_back_btn)
-    {
-        focus_first_valid(g_state.list_back_btn);
-    }
-    else if (g_state.top_bar.back_btn)
-    {
-        focus_first_valid(g_state.top_bar.back_btn);
-    }
+    return (index < g_state.item_count) ? g_state.item_widgets[index].btn : nullptr;
 }
 
-static void rebind_by_column()
+static int get_preferred_list_index(void* /*ctx*/)
 {
-    if (s_col == FocusColumn::Filter)
-    {
-        bind_filter_column();
-    }
-    else
-    {
-        bind_list_column();
-    }
+    return -1;
 }
 
-static void root_key_event_cb(lv_event_t* e)
+static lv_obj_t* get_list_back_button(void* /*ctx*/)
 {
-    uint32_t key = lv_event_get_key(e);
-    if (key == LV_KEY_BACKSPACE)
-    {
-        if (g_state.top_bar.back_btn)
-        {
-            lv_obj_send_event(g_state.top_bar.back_btn, LV_EVENT_CLICKED, nullptr);
-        }
-        return;
-    }
+    return g_state.list_back_btn;
+}
 
-    if (!is_encoder_active()) return;
-    if (key == LV_KEY_ESC)
-    {
-        s_col = FocusColumn::Filter;
-        rebind_by_column();
-        return;
-    }
-    if (key != LV_KEY_ENTER) return;
-
-    if (s_col == FocusColumn::Filter)
-    {
-        s_col = FocusColumn::List;
-        rebind_by_column();
-        return;
-    }
-
-    if (s_col == FocusColumn::List)
-    {
-        lv_obj_t* focused = s_group ? lv_group_get_focused(s_group) : nullptr;
-        if (focused == g_state.list_back_btn)
-        {
-            s_col = FocusColumn::Filter;
-            rebind_by_column();
-            return;
-        }
-    }
+static Adapter make_adapter()
+{
+    Adapter adapter{};
+    adapter.get_key_target = get_key_target;
+    adapter.get_top_back_button = get_top_back_button;
+    adapter.get_filter_count = get_filter_count;
+    adapter.get_filter_button = get_filter_button;
+    adapter.get_preferred_filter_index = get_preferred_filter_index;
+    adapter.get_list_count = get_list_count;
+    adapter.get_list_button = get_list_button;
+    adapter.get_preferred_list_index = get_preferred_list_index;
+    adapter.get_list_back_button = get_list_back_button;
+    adapter.filter_top_back_placement = BackPlacement::Leading;
+    return adapter;
 }
 
 } // namespace
 
 void init()
 {
-    if (s_group)
-    {
-        cleanup();
-    }
-    s_group = lv_group_create();
-    s_prev_group = lv_group_get_default();
-    set_default_group(nullptr);
-    set_default_group(s_group);
-    s_encoder = find_encoder_indev();
-    if (s_encoder)
-    {
-        lv_indev_set_group(s_encoder, s_group);
-    }
-    s_col = FocusColumn::Filter;
-    rebind_by_column();
-
-    lv_obj_t* key_target = g_state.root ? g_state.root : g_state.list_panel;
-    if (key_target && lv_obj_is_valid(key_target))
-    {
-        lv_obj_add_event_cb(key_target, root_key_event_cb, LV_EVENT_KEY, nullptr);
-    }
+    ::ui::components::two_pane_nav::init(&s_binding, make_adapter());
 }
 
 void cleanup()
 {
-    if (s_group)
-    {
-        if (s_encoder && lv_indev_get_group(s_encoder) == s_group)
-        {
-            lv_indev_set_group(s_encoder, nullptr);
-        }
-        set_default_group(nullptr);
-        lv_group_del(s_group);
-        s_group = nullptr;
-    }
-    s_encoder = nullptr;
-    if (s_prev_group)
-    {
-        set_default_group(s_prev_group);
-        s_prev_group = nullptr;
-    }
+    ::ui::components::two_pane_nav::cleanup(&s_binding);
 }
 
 void on_ui_refreshed()
 {
-    if (!s_group) return;
-    rebind_by_column();
+    ::ui::components::two_pane_nav::on_ui_refreshed(&s_binding);
 }
 
 void focus_to_filter()
 {
-    if (!s_group) return;
-    s_col = FocusColumn::Filter;
-    rebind_by_column();
+    ::ui::components::two_pane_nav::focus_filter(&s_binding);
 }
 
 void focus_to_list()
 {
-    if (!s_group) return;
-    s_col = FocusColumn::List;
-    rebind_by_column();
+    ::ui::components::two_pane_nav::focus_list(&s_binding);
 }
 
 lv_group_t* get_group()
 {
-    return s_group;
+    return ::ui::components::two_pane_nav::get_group(&s_binding);
 }
 
-} // namespace settings::ui::input
+} // namespace input
+} // namespace ui
+} // namespace settings

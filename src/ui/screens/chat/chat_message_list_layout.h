@@ -16,9 +16,6 @@ struct MessageListLayout
     lv_obj_t* team_btn;
 };
 
-// root/page
-lv_obj_t* create_root(lv_obj_t* parent);
-
 // split content (filter + list)
 MessageListLayout create_layout(lv_obj_t* parent);
 

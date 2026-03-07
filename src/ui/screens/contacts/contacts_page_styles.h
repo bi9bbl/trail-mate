@@ -8,7 +8,7 @@ namespace contacts::ui::style
 void init_once();
 
 /* Panels */
-void apply_panel_side(lv_obj_t* obj);      // filter_panel / action_panel (gray)
+void apply_panel_side(lv_obj_t* obj);      // filter panel background
 void apply_panel_main(lv_obj_t* obj);      // list_panel (white)
 void apply_container_white(lv_obj_t* obj); // sub_container / bottom_container (white)
 
